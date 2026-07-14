@@ -441,6 +441,13 @@
           "refreshModels": "Modelleri Yenile"
         }
       },
+      "context": {
+        "title": "Bağlam",
+        "accessibility": {
+          "label": "Erişilebilirlik Bağlamı",
+          "description": "Bir transkripsiyonu sonradan işlerken seçili veya odaktaki ekran metnini zaman damgalarıyla ekleyin."
+        }
+      },
       "prompts": {
         "title": "Prompt",
         "selectedPrompt": {

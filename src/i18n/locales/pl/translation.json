@@ -441,6 +441,13 @@
           "refreshModels": "Odśwież modele"
         }
       },
+      "context": {
+        "title": "Kontekst",
+        "accessibility": {
+          "label": "Kontekst dostępności",
+          "description": "Dołącz zaznaczony lub aktywny tekst z ekranu ze znacznikami czasu podczas przetwarzania transkrypcji."
+        }
+      },
       "prompts": {
         "title": "Prompt",
         "selectedPrompt": {

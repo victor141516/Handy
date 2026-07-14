@@ -94,6 +94,8 @@ pub fn cancel_current_operation(app: &AppHandle) {
     let recording_was_active = audio_manager.is_recording();
     audio_manager.cancel_recording();
 
+    let _ = crate::accessibility_context::stop_recording_context();
+
     // Abandon any live streaming transcription
     let tm = app.state::<Arc<TranscriptionManager>>();
     tm.cancel_stream();

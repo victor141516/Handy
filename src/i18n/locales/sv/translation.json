@@ -441,6 +441,13 @@
           "refreshModels": "Uppdatera modeller"
         }
       },
+      "context": {
+        "title": "Kontext",
+        "accessibility": {
+          "label": "Hjälpmedelskontext",
+          "description": "Inkludera markerad eller fokuserad skärmtext med tidsstämplar vid efterbearbetning av en transkription."
+        }
+      },
       "prompts": {
         "title": "Prompt",
         "selectedPrompt": {

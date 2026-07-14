@@ -441,6 +441,13 @@
           "refreshModels": "Modellen verversen"
         }
       },
+      "context": {
+        "title": "Context",
+        "accessibility": {
+          "label": "Toegankelijkheidscontext",
+          "description": "Neem geselecteerde of gefocuste schermtekst met tijdstempels op bij het nabewerken van een transcriptie."
+        }
+      },
       "prompts": {
         "title": "Prompt",
         "selectedPrompt": {

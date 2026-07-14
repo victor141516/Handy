@@ -441,6 +441,13 @@
           "refreshModels": "רענן מודלים"
         }
       },
+      "context": {
+        "title": "הקשר",
+        "accessibility": {
+          "label": "הקשר נגישות",
+          "description": "כלול טקסט נבחר או ממוקד מהמסך עם חותמות זמן בעת עיבוד לאחר תמלול."
+        }
+      },
       "prompts": {
         "title": "פרומפט",
         "selectedPrompt": {

@@ -441,6 +441,13 @@
           "refreshModels": "モデルを更新"
         }
       },
+      "context": {
+        "title": "コンテキスト",
+        "accessibility": {
+          "label": "アクセシビリティコンテキスト",
+          "description": "文字起こしの後処理時に、画面上で選択またはフォーカスされたテキストをタイムスタンプ付きで含めます。"
+        }
+      },
       "prompts": {
         "title": "プロンプト",
         "selectedPrompt": {

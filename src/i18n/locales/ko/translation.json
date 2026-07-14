@@ -441,6 +441,13 @@
           "refreshModels": "모델 새로고침"
         }
       },
+      "context": {
+        "title": "컨텍스트",
+        "accessibility": {
+          "label": "손쉬운 사용 컨텍스트",
+          "description": "전사 후처리 시 화면에서 선택되었거나 포커스된 텍스트를 타임스탬프와 함께 포함합니다."
+        }
+      },
       "prompts": {
         "title": "프롬프트",
         "selectedPrompt": {
