@@ -9,6 +9,7 @@ import {
   SettingContainer,
   SettingsGroup,
   Textarea,
+  ToggleSwitch,
 } from "@/components/ui";
 import { Button } from "../../ui/Button";
 import { ResetButton } from "../../ui/ResetButton";
@@ -414,6 +415,29 @@ const PostProcessingSettingsPromptsComponent: React.FC = () => {
   );
 };
 
+const PostProcessingSettingsContextComponent: React.FC = () => {
+  const { t } = useTranslation();
+  const { getSetting, updateSetting, isUpdating } = useSettings();
+  const enabled =
+    getSetting("post_process_accessibility_context_enabled") || false;
+
+  return (
+    <ToggleSwitch
+      checked={enabled}
+      onChange={(enabled) =>
+        updateSetting("post_process_accessibility_context_enabled", enabled)
+      }
+      isUpdating={isUpdating("post_process_accessibility_context_enabled")}
+      label={t("settings.postProcessing.context.accessibility.label")}
+      description={t(
+        "settings.postProcessing.context.accessibility.description",
+      )}
+      descriptionMode="tooltip"
+      grouped={true}
+    />
+  );
+};
+
 export const PostProcessingSettingsApi = React.memo(
   PostProcessingSettingsApiComponent,
 );
@@ -423,6 +447,11 @@ export const PostProcessingSettingsPrompts = React.memo(
   PostProcessingSettingsPromptsComponent,
 );
 PostProcessingSettingsPrompts.displayName = "PostProcessingSettingsPrompts";
+
+export const PostProcessingSettingsContext = React.memo(
+  PostProcessingSettingsContextComponent,
+);
+PostProcessingSettingsContext.displayName = "PostProcessingSettingsContext";
 
 export const PostProcessingSettings: React.FC = () => {
   const { t } = useTranslation();
@@ -439,6 +468,10 @@ export const PostProcessingSettings: React.FC = () => {
 
       <SettingsGroup title={t("settings.postProcessing.api.title")}>
         <PostProcessingSettingsApi />
+      </SettingsGroup>
+
+      <SettingsGroup title={t("settings.postProcessing.context.title")}>
+        <PostProcessingSettingsContext />
       </SettingsGroup>
 
       <SettingsGroup title={t("settings.postProcessing.prompts.title")}>

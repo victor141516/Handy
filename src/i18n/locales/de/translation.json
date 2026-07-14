@@ -401,6 +401,13 @@
           "refreshModels": "Modelle aktualisieren"
         }
       },
+      "context": {
+        "title": "Kontext",
+        "accessibility": {
+          "label": "Bedienungshilfen-Kontext",
+          "description": "Ausgewählten oder fokussierten Bildschirmtext mit Zeitstempeln beim Nachbearbeiten einer Transkription einbeziehen."
+        }
+      },
       "prompts": {
         "title": "Prompt",
         "selectedPrompt": {

@@ -401,6 +401,13 @@
           "refreshModels": "Obnovit modely"
         }
       },
+      "context": {
+        "title": "Kontext",
+        "accessibility": {
+          "label": "Kontext zpřístupnění",
+          "description": "Při následném zpracování přepisu zahrne vybraný nebo zaměřený text na obrazovce s časovými značkami."
+        }
+      },
       "prompts": {
         "title": "Prompt",
         "selectedPrompt": {

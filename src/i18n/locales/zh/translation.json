@@ -401,6 +401,13 @@
           "refreshModels": "刷新模型"
         }
       },
+      "context": {
+        "title": "上下文",
+        "accessibility": {
+          "label": "辅助功能上下文",
+          "description": "在后处理转录文本时，包含屏幕上选中或聚焦的文本及其时间戳。"
+        }
+      },
       "prompts": {
         "title": "提示词",
         "selectedPrompt": {

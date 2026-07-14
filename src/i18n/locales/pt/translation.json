@@ -401,6 +401,13 @@
           "refreshModels": "Atualizar modelos"
         }
       },
+      "context": {
+        "title": "Contexto",
+        "accessibility": {
+          "label": "Contexto de acessibilidade",
+          "description": "Inclui texto selecionado ou em foco na tela com timestamps ao pós-processar uma transcrição."
+        }
+      },
       "prompts": {
         "title": "Prompt",
         "selectedPrompt": {

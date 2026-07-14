@@ -401,6 +401,13 @@
           "refreshModels": "Refresh models"
         }
       },
+      "context": {
+        "title": "Context",
+        "accessibility": {
+          "label": "Accessibility Context",
+          "description": "Include selected or focused on-screen text with timestamps when post-processing a transcription."
+        }
+      },
       "prompts": {
         "title": "Prompt",
         "selectedPrompt": {

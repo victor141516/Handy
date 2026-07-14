@@ -1,3 +1,4 @@
+use crate::accessibility_context::AccessibilityContextEvent;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use crate::apple_intelligence;
 use crate::audio_feedback::{play_feedback_sound, play_feedback_sound_blocking, SoundType};
@@ -5,8 +6,8 @@ use crate::audio_toolkit::{is_microphone_access_denied, is_no_input_device_error
 use crate::managers::audio::AudioRecordingManager;
 use crate::managers::history::HistoryManager;
 use crate::managers::model::ModelManager;
-use crate::managers::transcription::StreamWorkKind;
 use crate::managers::transcription::TranscriptionManager;
+use crate::managers::transcription::{StreamWorkKind, TranscriptionOutput};
 use crate::settings::{get_settings, AppSettings, OverlayStyle, APPLE_INTELLIGENCE_PROVIDER_ID};
 use crate::shortcut;
 use crate::tray::{change_tray_icon, TrayIconState};
@@ -75,6 +76,145 @@ fn build_system_prompt(prompt_template: &str) -> String {
 /// transcription".
 fn is_blank_transcription(transcription: &str) -> bool {
     transcription.trim().is_empty()
+}
+
+enum TimelineEntry {
+    Transcription {
+        start_ms: u64,
+        end_ms: u64,
+        text: String,
+    },
+    Accessibility {
+        elapsed_ms: u64,
+        app_name: String,
+        window_title: String,
+        element: String,
+        text: String,
+    },
+}
+
+impl TimelineEntry {
+    fn start_ms(&self) -> u64 {
+        match self {
+            Self::Transcription { start_ms, .. } => *start_ms,
+            Self::Accessibility { elapsed_ms, .. } => *elapsed_ms,
+        }
+    }
+
+    fn sort_rank(&self) -> u8 {
+        match self {
+            Self::Transcription { .. } => 0,
+            Self::Accessibility { .. } => 1,
+        }
+    }
+}
+
+fn compact_timeline_text(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn format_timestamp(ms: u64) -> String {
+    let minutes = ms / 60_000;
+    let seconds = (ms % 60_000) / 1_000;
+    let millis = ms % 1_000;
+    format!("{:02}:{:02}.{:03}", minutes, seconds, millis)
+}
+
+fn build_accessibility_timeline(
+    transcription: &TranscriptionOutput,
+    accessibility_events: &[AccessibilityContextEvent],
+) -> Option<String> {
+    if accessibility_events.is_empty() {
+        return None;
+    }
+
+    let mut entries = Vec::new();
+    for segment in &transcription.segments {
+        let text = compact_timeline_text(&segment.text);
+        if !text.is_empty() {
+            entries.push(TimelineEntry::Transcription {
+                start_ms: segment.start_ms,
+                end_ms: segment.end_ms,
+                text,
+            });
+        }
+    }
+
+    if entries.is_empty() {
+        let text = compact_timeline_text(&transcription.text);
+        if !text.is_empty() {
+            entries.push(TimelineEntry::Transcription {
+                start_ms: 0,
+                end_ms: 0,
+                text,
+            });
+        }
+    }
+
+    for event in accessibility_events {
+        let text = compact_timeline_text(&event.text);
+        if !text.is_empty() {
+            entries.push(TimelineEntry::Accessibility {
+                elapsed_ms: event.elapsed_ms,
+                app_name: event.app_name.clone(),
+                window_title: event.window_title.clone(),
+                element: event.element.clone(),
+                text,
+            });
+        }
+    }
+
+    if entries.is_empty() {
+        return None;
+    }
+
+    entries.sort_by_key(|entry| (entry.start_ms(), entry.sort_rank()));
+
+    let mut output = String::from(
+        "Ordered timeline. Transcription lines are dictated speech. Hint lines are screen context from macOS Accessibility; use them only as context.\n\n",
+    );
+
+    for entry in entries {
+        match entry {
+            TimelineEntry::Transcription {
+                start_ms,
+                end_ms,
+                text,
+            } if end_ms > start_ms => {
+                output.push_str(&format!(
+                    "[{}-{}] Transcription: {}\n",
+                    format_timestamp(start_ms),
+                    format_timestamp(end_ms),
+                    text
+                ));
+            }
+            TimelineEntry::Transcription { start_ms, text, .. } => {
+                output.push_str(&format!(
+                    "[{}] Transcription: {}\n",
+                    format_timestamp(start_ms),
+                    text
+                ));
+            }
+            TimelineEntry::Accessibility {
+                elapsed_ms,
+                app_name,
+                window_title,
+                element,
+                text,
+            } => {
+                output.push_str(&format!(
+                    "[{}] Hint: Application: {} | Window: {} | Element: {} | Text: {}\n",
+                    format_timestamp(elapsed_ms),
+                    app_name,
+                    window_title,
+                    element,
+                    text
+                ));
+            }
+        }
+    }
+
+    Some(output)
 }
 
 async fn complete_unless_cancelled<F, C>(operation: F, is_cancelled: C) -> Option<F::Output>
@@ -418,6 +558,7 @@ pub(crate) async fn process_transcription_output(
     app: &AppHandle,
     transcription: &str,
     post_process: bool,
+    post_process_input: Option<&str>,
 ) -> ProcessedTranscription {
     let settings = get_settings(app);
     let mut final_text = transcription.to_string();
@@ -435,7 +576,8 @@ pub(crate) async fn process_transcription_output(
     }
 
     if post_process {
-        if let Some(processed_text) = post_process_transcription(&settings, &final_text).await {
+        let llm_input = post_process_input.unwrap_or(&final_text);
+        if let Some(processed_text) = post_process_transcription(&settings, llm_input).await {
             post_processed_text = Some(processed_text.clone());
             final_text = processed_text;
 
@@ -578,9 +720,13 @@ impl ShortcutAction for TranscribeAction {
         }
 
         if recording_error.is_none() {
+            if self.post_process && settings.post_process_accessibility_context_enabled {
+                crate::accessibility_context::start_recording_context();
+            }
             // Dynamically register the cancel shortcut in a separate task to avoid deadlock
             shortcut::register_cancel_shortcut(app);
         } else {
+            let _ = crate::accessibility_context::stop_recording_context();
             // Starting failed (for example due to blocked microphone permissions).
             // Revert UI state so we don't stay stuck in the recording overlay.
             tm.cancel_stream();
@@ -627,7 +773,8 @@ impl ShortcutAction for TranscribeAction {
         // the larger panel, but it still switches from listening to a working
         // spinner while the stream finalizes. Non-streaming paths use the
         // compact transcribing pill (None no-ops in show_*).
-        let style = get_settings(app).overlay_style;
+        let settings = get_settings(app);
+        let style = settings.overlay_style;
         // Capture this before finalizing the stream so every later working state
         // targets the same overlay that was shown for this transcription.
         let use_streaming_overlay = should_use_streaming_overlay(style, tm.is_streaming());
@@ -645,6 +792,9 @@ impl ShortcutAction for TranscribeAction {
 
         let binding_id = binding_id.to_string(); // Clone binding_id for the async task
         let post_process = self.post_process;
+        let use_accessibility_context =
+            post_process && settings.post_process_accessibility_context_enabled;
+        let accessibility_events = crate::accessibility_context::stop_recording_context();
         let cancel_generation = rm.cancel_generation();
 
         tauri::async_runtime::spawn(async move {
@@ -692,16 +842,28 @@ impl ShortcutAction for TranscribeAction {
                     // running, finalize it and use its text (all audio was already
                     // fed to the stream); otherwise batch-transcribe the samples.
                     let transcription_time = Instant::now();
-                    let transcription_result = match tm.finalize_stream() {
-                        // A finalized stream with usable text wins. An empty result
-                        // (no active stream, produced nothing, or a finalize error
-                        // after the engine was returned) falls back to a full batch
-                        // transcription of the same audio. A finalize timeout is
-                        // surfaced instead — the worker may still hold the engine,
-                        // so a batch fallback would contend with it.
-                        Ok(Some(text)) if !text.trim().is_empty() => Ok(text),
-                        Ok(_) => tm.transcribe(samples),
-                        Err(err) => Err(err),
+                    let transcription_result = if use_accessibility_context {
+                        // Accessibility timelines need real segment timestamps. The
+                        // current live-streaming path only returns final text, so close
+                        // the stream worker first, then batch-transcribe with segments.
+                        match tm.finalize_stream() {
+                            Ok(_) => tm.transcribe_detailed(samples),
+                            Err(err) => Err(err),
+                        }
+                    } else {
+                        match tm.finalize_stream() {
+                            // A finalized stream with usable text wins. An empty result
+                            // (no active stream, produced nothing, or a finalize error
+                            // after the engine was returned) falls back to a full batch
+                            // transcription of the same audio. A finalize timeout is
+                            // surfaced instead — the worker may still hold the engine,
+                            // so a batch fallback would contend with it.
+                            Ok(Some(text)) if !text.trim().is_empty() => {
+                                Ok(TranscriptionOutput::text_only(text, sample_count))
+                            }
+                            Ok(_) => tm.transcribe_detailed(samples),
+                            Err(err) => Err(err),
+                        }
                     };
 
                     // Await WAV save and verify
@@ -740,7 +902,7 @@ impl ShortcutAction for TranscribeAction {
                             debug!(
                                 "Transcription completed in {:?}: '{}'",
                                 transcription_time.elapsed(),
-                                transcription
+                                transcription.text
                             );
 
                             if post_process {
@@ -750,8 +912,18 @@ impl ShortcutAction for TranscribeAction {
                                     show_processing_overlay(&ah);
                                 }
                             }
+                            let post_process_input = if use_accessibility_context {
+                                build_accessibility_timeline(&transcription, &accessibility_events)
+                            } else {
+                                None
+                            };
                             let Some(processed) = complete_unless_cancelled(
-                                process_transcription_output(&ah, &transcription, post_process),
+                                process_transcription_output(
+                                    &ah,
+                                    &transcription.text,
+                                    post_process,
+                                    post_process_input.as_deref(),
+                                ),
                                 || rm.was_cancelled_since(cancel_generation),
                             )
                             .await
@@ -773,7 +945,7 @@ impl ShortcutAction for TranscribeAction {
                             if wav_saved {
                                 if let Err(err) = hm.save_entry(
                                     file_name,
-                                    transcription,
+                                    transcription.text.clone(),
                                     post_process,
                                     processed.post_processed_text.clone(),
                                     processed.post_process_prompt.clone(),
@@ -927,7 +1099,12 @@ pub static ACTION_MAP: Lazy<HashMap<String, Arc<dyn ShortcutAction>>> = Lazy::ne
 
 #[cfg(test)]
 mod tests {
-    use super::{complete_unless_cancelled, is_blank_transcription, should_use_streaming_overlay};
+    use super::{
+        build_accessibility_timeline, complete_unless_cancelled, is_blank_transcription,
+        should_use_streaming_overlay,
+    };
+    use crate::accessibility_context::AccessibilityContextEvent;
+    use crate::managers::transcription::{TranscriptionOutput, TranscriptionSegment};
     use crate::settings::OverlayStyle;
     use std::future;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -946,6 +1123,62 @@ mod tests {
     fn non_blank_transcription_is_kept() {
         assert!(!is_blank_transcription("hello"));
         assert!(!is_blank_transcription("  hello  "));
+    }
+
+    #[test]
+    fn accessibility_timeline_is_absent_without_accessibility_events() {
+        let transcription = TranscriptionOutput {
+            text: "hello there".to_string(),
+            segments: vec![TranscriptionSegment {
+                start_ms: 0,
+                end_ms: 1_000,
+                text: "hello there".to_string(),
+            }],
+        };
+
+        assert!(build_accessibility_timeline(&transcription, &[]).is_none());
+    }
+
+    #[test]
+    fn accessibility_timeline_interleaves_transcription_and_hints() {
+        let transcription = TranscriptionOutput {
+            text: "open this button".to_string(),
+            segments: vec![
+                TranscriptionSegment {
+                    start_ms: 0,
+                    end_ms: 900,
+                    text: "open this".to_string(),
+                },
+                TranscriptionSegment {
+                    start_ms: 1_500,
+                    end_ms: 2_000,
+                    text: "button".to_string(),
+                },
+            ],
+        };
+        let accessibility_events = vec![AccessibilityContextEvent {
+            elapsed_ms: 1_000,
+            app_name: "Google Chrome".to_string(),
+            window_title: "Example".to_string(),
+            element: "AXButton".to_string(),
+            text: "Submit".to_string(),
+        }];
+
+        let timeline = build_accessibility_timeline(&transcription, &accessibility_events).unwrap();
+
+        assert!(timeline.contains("[00:00.000-00:00.900] Transcription: open this"));
+        assert!(timeline.contains(
+            "[00:01.000] Hint: Application: Google Chrome | Window: Example | Element: AXButton | Text: Submit"
+        ));
+        assert!(timeline.contains("[00:01.500-00:02.000] Transcription: button"));
+        assert!(
+            timeline.find("Transcription: open this").unwrap()
+                < timeline.find("Hint: Application").unwrap()
+        );
+        assert!(
+            timeline.find("Hint: Application").unwrap()
+                < timeline.find("Transcription: button").unwrap()
+        );
     }
 
     #[test]

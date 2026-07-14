@@ -401,6 +401,13 @@
           "refreshModels": "Làm mới mô hình"
         }
       },
+      "context": {
+        "title": "Ngữ cảnh",
+        "accessibility": {
+          "label": "Ngữ cảnh trợ năng",
+          "description": "Bao gồm văn bản được chọn hoặc đang lấy nét trên màn hình kèm dấu thời gian khi hậu xử lý bản chép lời."
+        }
+      },
       "prompts": {
         "title": "Prompt",
         "selectedPrompt": {

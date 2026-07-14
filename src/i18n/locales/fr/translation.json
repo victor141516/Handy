@@ -401,6 +401,13 @@
           "refreshModels": "Actualiser les modèles"
         }
       },
+      "context": {
+        "title": "Contexte",
+        "accessibility": {
+          "label": "Contexte d’accessibilité",
+          "description": "Inclure le texte sélectionné ou ciblé à l’écran avec des horodatages lors du post-traitement d’une transcription."
+        }
+      },
       "prompts": {
         "title": "Prompt",
         "selectedPrompt": {
