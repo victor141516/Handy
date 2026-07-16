@@ -35,7 +35,6 @@ use transcribe_rs::{
 
 const STREAM_PERF_LOG_INTERVAL: Duration = Duration::from_secs(5);
 const STREAM_FINALIZE_REPLY_TIMEOUT: Duration = Duration::from_secs(30);
-
 #[derive(Clone, Debug, Serialize)]
 pub struct ModelStateEvent {
     pub event_type: String,
@@ -1134,6 +1133,18 @@ impl TranscriptionManager {
     }
 
     pub fn transcribe_detailed(&self, audio: Vec<f32>) -> Result<TranscriptionOutput> {
+        self.transcribe_detailed_with_options(audio, false)
+    }
+
+    pub fn transcribe_detailed_for_context(&self, audio: Vec<f32>) -> Result<TranscriptionOutput> {
+        self.transcribe_detailed_with_options(audio, true)
+    }
+
+    fn transcribe_detailed_with_options(
+        &self,
+        audio: Vec<f32>,
+        prefer_word_timestamps: bool,
+    ) -> Result<TranscriptionOutput> {
         #[cfg(debug_assertions)]
         if std::env::var("HANDY_FORCE_TRANSCRIPTION_FAILURE").is_ok() {
             return Err(anyhow::anyhow!(
@@ -1194,12 +1205,6 @@ impl TranscriptionManager {
             );
         }
 
-        // Whether the loaded transcribe-cpp model advertises
-        // Feature::InitialPrompt. Informational (logged below); the whisper
-        // run extension and the fuzzy-correction skip are gated on
-        // `model_is_whisper` instead, since non-whisper archs can advertise
-        // the feature while rejecting the whisper-kind extension.
-        let mut model_takes_initial_prompt = false;
         // Whether the loaded model is actually whisper-family (arch string).
         // Non-whisper archs (e.g. Voxtral Small) can advertise
         // Feature::InitialPrompt yet reject the whisper-kind run extension
@@ -1235,25 +1240,28 @@ impl TranscriptionManager {
             // INVALID_ARG; attach it — and translate — only where supported.
             let mut model_supports_translate = false;
             let mut model_languages: Vec<String> = Vec::new();
+            let mut model_max_timestamp_kind = TimestampKind::None;
             if let LoadedEngine::TranscribeCpp(session) = &engine {
                 let model = session.model();
                 let caps = model.capabilities();
-                model_takes_initial_prompt = model.supports(Feature::InitialPrompt);
+                let model_takes_initial_prompt = model.supports(Feature::InitialPrompt);
                 model_is_whisper = model.arch() == "whisper";
                 model_supports_translate = caps.supports_translate;
                 model_languages = caps.languages;
+                model_max_timestamp_kind = caps.max_timestamp_kind;
                 debug!(
-                    "transcribe-cpp model '{}' on '{}': initial_prompt={}, translate={}, languages={:?}",
+                    "transcribe-cpp model '{}' on '{}': initial_prompt={}, translate={}, max_timestamps={:?}, languages={:?}",
                     settings.selected_model,
                     model.backend(),
                     model_takes_initial_prompt,
                     model_supports_translate,
+                    model_max_timestamp_kind,
                     model_languages
                 );
             }
 
-            let transcribe_result =
-                catch_unwind(AssertUnwindSafe(|| -> Result<TranscriptionOutput> {
+            let transcribe_result = catch_unwind(AssertUnwindSafe(
+                || -> Result<TranscriptionOutput> {
                     match &mut engine {
                         LoadedEngine::TranscribeCpp(session) => {
                             // Custom words become the initial prompt ONLY for models
@@ -1279,7 +1287,10 @@ impl TranscriptionManager {
 
                             let run_options = RunOptions {
                                 task: run_plan.task,
-                                timestamps: TimestampKind::Segment,
+                                timestamps: detailed_timestamp_kind(
+                                    model_max_timestamp_kind,
+                                    prefer_word_timestamps,
+                                ),
                                 language: run_plan.language,
                                 target_language: run_plan.target_language,
                                 family,
@@ -1287,9 +1298,10 @@ impl TranscriptionManager {
                             };
 
                             debug!(
-                                "transcribe-cpp run: task={:?}, language={:?}, initial_prompt={}",
+                                "transcribe-cpp run: task={:?}, language={:?}, timestamps={:?}, initial_prompt={}",
                                 run_options.task,
                                 run_options.language,
+                                run_options.timestamps,
                                 run_options.family.is_some()
                             );
 
@@ -1378,7 +1390,8 @@ impl TranscriptionManager {
                                 .map_err(|e| anyhow::anyhow!("Cohere transcription failed: {}", e))
                         }
                     }
-                }));
+                },
+            ));
 
             match transcribe_result {
                 Ok(inner_result) => {
@@ -1438,7 +1451,13 @@ impl TranscriptionManager {
         let filtered_result =
             post_process_transcription_text(output.text.clone(), &settings, model_is_whisper);
         if filtered_result != output.text {
-            output = TranscriptionOutput::text_only(filtered_result, audio_len);
+            output = post_process_transcription_output_segments(
+                output,
+                filtered_result,
+                &settings,
+                model_is_whisper,
+                audio_len,
+            );
         } else {
             output.text = filtered_result;
         }
@@ -1480,6 +1499,20 @@ fn seconds_to_ms(seconds: f32) -> u64 {
     (seconds.max(0.0) * 1000.0).round() as u64
 }
 
+fn detailed_timestamp_kind(
+    max_timestamp_kind: TimestampKind,
+    prefer_word_timestamps: bool,
+) -> TimestampKind {
+    if prefer_word_timestamps {
+        match max_timestamp_kind {
+            TimestampKind::Word | TimestampKind::Token => TimestampKind::Word,
+            _ => TimestampKind::Segment,
+        }
+    } else {
+        TimestampKind::Segment
+    }
+}
+
 fn transcription_output_from_rs(
     result: transcribe_rs::TranscriptionResult,
     audio_len: usize,
@@ -1515,21 +1548,25 @@ fn transcription_output_from_cpp(
     transcript: transcribe_cpp::Transcript,
     audio_len: usize,
 ) -> TranscriptionOutput {
-    let segments = transcript
-        .segments
-        .into_iter()
-        .filter_map(|segment| {
-            let text = segment.text.trim().to_string();
-            if text.is_empty() {
-                return None;
-            }
-            Some(TranscriptionSegment {
-                start_ms: segment.t0_ms.max(0) as u64,
-                end_ms: segment.t1_ms.max(0) as u64,
-                text,
+    let segments = if transcript.words.is_empty() {
+        transcript
+            .segments
+            .into_iter()
+            .filter_map(|segment| {
+                let text = segment.text.trim().to_string();
+                if text.is_empty() {
+                    return None;
+                }
+                Some(TranscriptionSegment {
+                    start_ms: segment.t0_ms.max(0) as u64,
+                    end_ms: segment.t1_ms.max(0) as u64,
+                    text,
+                })
             })
-        })
-        .collect::<Vec<_>>();
+            .collect::<Vec<_>>()
+    } else {
+        transcription_segments_from_cpp_words(&transcript.words)
+    };
 
     if segments.is_empty() {
         TranscriptionOutput::text_only(transcript.text, audio_len)
@@ -1539,6 +1576,68 @@ fn transcription_output_from_cpp(
             segments,
         }
     }
+}
+
+fn transcription_segments_from_cpp_words(
+    words: &[transcribe_cpp::Word],
+) -> Vec<TranscriptionSegment> {
+    words
+        .iter()
+        .filter_map(|word| {
+            let text = word.text.trim().to_string();
+            if text.is_empty() {
+                return None;
+            }
+
+            Some(TranscriptionSegment {
+                start_ms: word.t0_ms.max(0) as u64,
+                end_ms: word.t1_ms.max(word.t0_ms).max(0) as u64,
+                text,
+            })
+        })
+        .collect()
+}
+
+fn post_process_transcription_output_segments(
+    mut output: TranscriptionOutput,
+    filtered_text: String,
+    settings: &AppSettings,
+    custom_words_already_prompted: bool,
+    audio_len: usize,
+) -> TranscriptionOutput {
+    if output.segments.is_empty() {
+        return TranscriptionOutput::text_only(filtered_text, audio_len);
+    }
+
+    let segments = std::mem::take(&mut output.segments)
+        .into_iter()
+        .filter_map(|segment| {
+            let TranscriptionSegment {
+                start_ms,
+                end_ms,
+                text,
+            } = segment;
+            let text =
+                post_process_transcription_text(text, settings, custom_words_already_prompted);
+            if text.trim().is_empty() {
+                None
+            } else {
+                Some(TranscriptionSegment {
+                    start_ms,
+                    end_ms,
+                    text,
+                })
+            }
+        })
+        .collect::<Vec<_>>();
+
+    output.text = filtered_text;
+    output.segments = if segments.is_empty() {
+        TranscriptionOutput::text_only(output.text.clone(), audio_len).segments
+    } else {
+        segments
+    };
+    output
 }
 
 struct StreamPerf {
@@ -2004,9 +2103,19 @@ pub fn get_available_accelerators() -> AvailableAccelerators {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use transcribe_cpp::{Transcript, Word};
 
     fn languages(codes: &[&str]) -> Vec<String> {
         codes.iter().map(|code| (*code).to_string()).collect()
+    }
+
+    fn word(start_ms: i64, end_ms: i64, text: &str) -> Word {
+        Word {
+            t0_ms: start_ms,
+            t1_ms: end_ms,
+            text: text.to_string(),
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -2043,6 +2152,82 @@ mod tests {
         assert!(matches!(plan.task, Task::Transcribe));
         assert_eq!(plan.language.as_deref(), Some("es"));
         assert_eq!(plan.target_language, None);
+    }
+
+    #[test]
+    fn detailed_context_prefers_word_timestamps_when_supported() {
+        assert_eq!(
+            detailed_timestamp_kind(TimestampKind::Word, true),
+            TimestampKind::Word
+        );
+        assert_eq!(
+            detailed_timestamp_kind(TimestampKind::Token, true),
+            TimestampKind::Word
+        );
+        assert_eq!(
+            detailed_timestamp_kind(TimestampKind::Segment, true),
+            TimestampKind::Segment
+        );
+        assert_eq!(
+            detailed_timestamp_kind(TimestampKind::Word, false),
+            TimestampKind::Segment
+        );
+    }
+
+    #[test]
+    fn cpp_word_timestamps_preserve_word_timed_units() {
+        let transcript = Transcript {
+            text: "first phrase second phrase".to_string(),
+            words: vec![
+                word(100, 250, "first"),
+                word(260, 500, "phrase"),
+                word(1_500, 1_700, "second"),
+                word(1_720, 1_950, "phrase"),
+            ],
+            ..Default::default()
+        };
+
+        let output = transcription_output_from_cpp(transcript, 32_000);
+
+        assert_eq!(output.segments.len(), 4);
+        assert_eq!(output.segments[0].start_ms, 100);
+        assert_eq!(output.segments[0].end_ms, 250);
+        assert_eq!(output.segments[0].text, "first");
+        assert_eq!(output.segments[1].start_ms, 260);
+        assert_eq!(output.segments[1].end_ms, 500);
+        assert_eq!(output.segments[1].text, "phrase");
+        assert_eq!(output.segments[2].start_ms, 1_500);
+        assert_eq!(output.segments[2].end_ms, 1_700);
+        assert_eq!(output.segments[2].text, "second");
+        assert_eq!(output.segments[3].start_ms, 1_720);
+        assert_eq!(output.segments[3].end_ms, 1_950);
+        assert_eq!(output.segments[3].text, "phrase");
+    }
+
+    #[test]
+    fn cpp_word_timestamps_are_not_merged_by_speech_gaps() {
+        let transcript = Transcript {
+            text: "one continuous thought".to_string(),
+            words: vec![
+                word(100, 250, "one"),
+                word(300, 550, "continuous"),
+                word(600, 800, "thought"),
+            ],
+            ..Default::default()
+        };
+
+        let output = transcription_output_from_cpp(transcript, 16_000);
+
+        assert_eq!(output.segments.len(), 3);
+        assert_eq!(output.segments[0].start_ms, 100);
+        assert_eq!(output.segments[0].end_ms, 250);
+        assert_eq!(output.segments[0].text, "one");
+        assert_eq!(output.segments[1].start_ms, 300);
+        assert_eq!(output.segments[1].end_ms, 550);
+        assert_eq!(output.segments[1].text, "continuous");
+        assert_eq!(output.segments[2].start_ms, 600);
+        assert_eq!(output.segments[2].end_ms, 800);
+        assert_eq!(output.segments[2].text, "thought");
     }
 }
 

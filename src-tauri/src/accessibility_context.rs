@@ -7,9 +7,78 @@ pub struct AccessibilityContextEvent {
     pub text: String,
 }
 
+pub(crate) fn deduplicate_accessibility_events(
+    events: &[AccessibilityContextEvent],
+) -> Vec<AccessibilityContextEvent> {
+    let mut deduplicated = Vec::with_capacity(events.len());
+    for event in events {
+        push_deduplicated_event(&mut deduplicated, event.clone());
+    }
+    deduplicated
+}
+
+fn push_deduplicated_event(
+    events: &mut Vec<AccessibilityContextEvent>,
+    event: AccessibilityContextEvent,
+) {
+    while events
+        .last()
+        .is_some_and(|previous| event_expands_previous(previous, &event))
+    {
+        events.pop();
+    }
+
+    events.push(event);
+}
+
+fn event_expands_previous(
+    previous: &AccessibilityContextEvent,
+    next: &AccessibilityContextEvent,
+) -> bool {
+    if normalized_accessibility_text(&previous.app_name)
+        != normalized_accessibility_text(&next.app_name)
+        || normalized_accessibility_text(&previous.window_title)
+            != normalized_accessibility_text(&next.window_title)
+    {
+        return false;
+    }
+
+    let previous_text = normalized_accessibility_text(&previous.text);
+    let next_text = normalized_accessibility_text(&next.text);
+
+    !previous_text.is_empty()
+        && next_text.len() > previous_text.len()
+        && contains_expanded_text(&next_text, &previous_text)
+}
+
+fn contains_expanded_text(next_text: &str, previous_text: &str) -> bool {
+    if next_text.starts_with(previous_text) || next_text.ends_with(previous_text) {
+        return true;
+    }
+
+    next_text.match_indices(previous_text).any(|(index, _)| {
+        let before = next_text[..index].chars().next_back();
+        let after = next_text[index + previous_text.len()..].chars().next();
+
+        before.is_some_and(is_text_boundary) && after.is_some_and(is_text_boundary)
+    })
+}
+
+fn is_text_boundary(character: char) -> bool {
+    !character.is_alphanumeric()
+}
+
+fn normalized_accessibility_text(value: &str) -> String {
+    value
+        .replace('\u{00a0}', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[cfg(target_os = "macos")]
 mod platform {
-    use super::AccessibilityContextEvent;
+    use super::{push_deduplicated_event, AccessibilityContextEvent};
     use core_foundation::array::CFArray;
     use core_foundation::attributed_string::CFAttributedString;
     use core_foundation::base::{CFType, CFTypeRef, TCFType};
@@ -154,15 +223,20 @@ mod platform {
         while !stop.load(Ordering::Acquire) {
             if let Some(snapshot) = current_reading() {
                 if last_snapshot.as_ref() != Some(&snapshot) {
-                    events.push(AccessibilityContextEvent {
-                        elapsed_ms: duration_ms(started.elapsed()),
-                        app_name: snapshot.app_name.clone(),
-                        window_title: snapshot.window_title.clone(),
-                        element: snapshot.element.clone(),
-                        text: snapshot.text.clone(),
-                    });
+                    push_deduplicated_event(
+                        &mut events,
+                        AccessibilityContextEvent {
+                            elapsed_ms: duration_ms(started.elapsed()),
+                            app_name: snapshot.app_name.clone(),
+                            window_title: snapshot.window_title.clone(),
+                            element: snapshot.element.clone(),
+                            text: snapshot.text.clone(),
+                        },
+                    );
                     last_snapshot = Some(snapshot);
                 }
+            } else {
+                last_snapshot = None;
             }
 
             thread::sleep(POLL_INTERVAL);
@@ -241,6 +315,14 @@ mod platform {
                     text,
                 ));
             }
+        }
+
+        if focused_element
+            .as_ref()
+            .is_some_and(is_selection_only_text_surface)
+            || is_selection_only_application(&window_context.app_name)
+        {
+            return None;
         }
 
         if let Some(focused) = focused_element.as_ref() {
@@ -606,11 +688,16 @@ mod platform {
             return None;
         }
 
-        if (bool_attribute(element, "AXFocused") == Some(true)
-            || bool_attribute(element, "AXSelected") == Some(true))
-            && focused_element_text(element).is_some()
+        if bool_attribute(element, "AXFocused") == Some(true)
+            || bool_attribute(element, "AXSelected") == Some(true)
         {
-            return Some((element.clone(), focused_element_text(element)?));
+            if is_selection_only_text_surface(element) {
+                return None;
+            }
+
+            if let Some(text) = focused_element_text(element) {
+                return Some((element.clone(), text));
+            }
         }
 
         for child in child_elements(element) {
@@ -708,6 +795,34 @@ mod platform {
         }
     }
 
+    fn is_selection_only_application(app_name: &str) -> bool {
+        matches!(
+            normalize(app_name).as_str(),
+            "Visual Studio Code" | "Code" | "Code - Insiders" | "VSCodium"
+        )
+    }
+
+    fn is_selection_only_text_surface(element: &CFType) -> bool {
+        if bool_attribute(element, "AXEditable") == Some(true) {
+            return true;
+        }
+
+        let role = text_attribute(element, "AXRole")
+            .map(|role| role.to_ascii_lowercase())
+            .unwrap_or_default();
+        let subrole = text_attribute(element, "AXSubrole")
+            .map(|subrole| subrole.to_ascii_lowercase())
+            .unwrap_or_default();
+
+        role.contains("textfield")
+            || role.contains("textarea")
+            || role.contains("text area")
+            || role.contains("combobox")
+            || subrole.contains("textfield")
+            || subrole.contains("textarea")
+            || subrole.contains("text area")
+    }
+
     fn accessibility_text(value: &CFType) -> Option<String> {
         unsafe { text_from_type_ref(value.as_CFTypeRef()) }
     }
@@ -793,6 +908,25 @@ mod platform {
             unsafe { CFRelease(value) };
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::is_selection_only_application;
+
+        #[test]
+        fn code_editors_are_selection_only_applications() {
+            assert!(is_selection_only_application("Visual Studio Code"));
+            assert!(is_selection_only_application("Code"));
+            assert!(is_selection_only_application("Code - Insiders"));
+            assert!(is_selection_only_application("VSCodium"));
+        }
+
+        #[test]
+        fn regular_applications_are_not_selection_only_applications() {
+            assert!(!is_selection_only_application("Safari"));
+            assert!(!is_selection_only_application("Notes"));
+        }
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -807,3 +941,79 @@ mod platform {
 }
 
 pub use platform::{start_recording_context, stop_recording_context};
+
+#[cfg(test)]
+mod tests {
+    use super::{deduplicate_accessibility_events, AccessibilityContextEvent};
+
+    fn event(
+        elapsed_ms: u64,
+        app_name: &str,
+        window_title: &str,
+        text: &str,
+    ) -> AccessibilityContextEvent {
+        AccessibilityContextEvent {
+            elapsed_ms,
+            app_name: app_name.to_string(),
+            window_title: window_title.to_string(),
+            element: "Selected text".to_string(),
+            text: text.to_string(),
+        }
+    }
+
+    #[test]
+    fn deduplicate_accessibility_events_keeps_latest_expanded_selection() {
+        let events = vec![
+            event(100, "Notes", "Draft", "first"),
+            event(200, "Notes", "Draft", "first second"),
+            event(300, "Notes", "Draft", "first second third"),
+        ];
+
+        let deduplicated = deduplicate_accessibility_events(&events);
+
+        assert_eq!(
+            deduplicated,
+            vec![event(300, "Notes", "Draft", "first second third")]
+        );
+    }
+
+    #[test]
+    fn deduplicate_accessibility_events_handles_selection_expanding_backward() {
+        let events = vec![
+            event(100, "Notes", "Draft", "second"),
+            event(200, "Notes", "Draft", "first second"),
+        ];
+
+        let deduplicated = deduplicate_accessibility_events(&events);
+
+        assert_eq!(
+            deduplicated,
+            vec![event(200, "Notes", "Draft", "first second")]
+        );
+    }
+
+    #[test]
+    fn deduplicate_accessibility_events_preserves_different_locations() {
+        let events = vec![
+            event(100, "Notes", "Draft", "first"),
+            event(200, "Safari", "Draft", "first second"),
+            event(300, "Notes", "Other Draft", "first second third"),
+        ];
+
+        let deduplicated = deduplicate_accessibility_events(&events);
+
+        assert_eq!(deduplicated, events);
+    }
+
+    #[test]
+    fn deduplicate_accessibility_events_does_not_match_inside_words() {
+        let events = vec![
+            event(100, "Notes", "Draft", "art"),
+            event(200, "Notes", "Draft", "partial"),
+        ];
+
+        let deduplicated = deduplicate_accessibility_events(&events);
+
+        assert_eq!(deduplicated, events);
+    }
+}

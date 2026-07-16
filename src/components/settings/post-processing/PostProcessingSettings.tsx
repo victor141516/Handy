@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
+import { type as osType } from "@tauri-apps/plugin-os";
 import { RefreshCcw } from "lucide-react";
 import { commands } from "@/bindings";
 
@@ -455,6 +456,10 @@ PostProcessingSettingsContext.displayName = "PostProcessingSettingsContext";
 
 export const PostProcessingSettings: React.FC = () => {
   const { t } = useTranslation();
+  const isMacOS = osType() === "macos";
+  const contextItems = isMacOS
+    ? [<PostProcessingSettingsContext key="accessibility-context" />]
+    : [];
 
   return (
     <div className="max-w-3xl w-full mx-auto space-y-6">
@@ -470,9 +475,11 @@ export const PostProcessingSettings: React.FC = () => {
         <PostProcessingSettingsApi />
       </SettingsGroup>
 
-      <SettingsGroup title={t("settings.postProcessing.context.title")}>
-        <PostProcessingSettingsContext />
-      </SettingsGroup>
+      {contextItems.length > 0 && (
+        <SettingsGroup title={t("settings.postProcessing.context.title")}>
+          {contextItems}
+        </SettingsGroup>
+      )}
 
       <SettingsGroup title={t("settings.postProcessing.prompts.title")}>
         <PostProcessingSettingsPrompts />
