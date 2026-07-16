@@ -7,6 +7,8 @@ use std::collections::HashSet;
 use std::error::Error as StdError;
 use std::sync::{Mutex, OnceLock};
 
+const LLM_PAYLOAD_DEBUG_ENV: &str = "HANDY_DEBUG_LLM_PAYLOAD";
+
 #[derive(Debug, Serialize)]
 struct ChatMessage {
     role: String,
@@ -133,6 +135,31 @@ struct ChatChoice {
 #[derive(Debug, Deserialize)]
 struct ChatMessageResponse {
     content: Option<String>,
+}
+
+pub(crate) fn llm_payload_logging_enabled() -> bool {
+    std::env::var(LLM_PAYLOAD_DEBUG_ENV)
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            matches!(value.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
+}
+
+pub(crate) fn log_debug_llm_payload<T>(label: &str, payload: &T)
+where
+    T: Serialize + ?Sized,
+{
+    if !llm_payload_logging_enabled() {
+        return;
+    }
+
+    match serde_json::to_string_pretty(payload) {
+        Ok(json) => info!("{LLM_PAYLOAD_DEBUG_ENV} enabled. {label}:\n{json}"),
+        Err(err) => {
+            info!("{LLM_PAYLOAD_DEBUG_ENV} enabled but payload serialization failed: {err}")
+        }
+    }
 }
 
 /// Build headers for API requests based on provider type
@@ -386,6 +413,10 @@ pub async fn send_chat_completion_with_schema(
         response_format,
         reasoning,
     };
+    log_debug_llm_payload(
+        &format!("LLM chat completion request body for {url}"),
+        &request_body,
+    );
 
     let mut response = client
         .post(&url)

@@ -1,4 +1,4 @@
-use crate::accessibility_context::AccessibilityContextEvent;
+use crate::accessibility_context::{deduplicate_accessibility_events, AccessibilityContextEvent};
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use crate::apple_intelligence;
 use crate::audio_feedback::{play_feedback_sound, play_feedback_sound_blocking, SoundType};
@@ -105,29 +105,56 @@ enum TimelineEntry {
         elapsed_ms: u64,
         app_name: String,
         window_title: String,
-        element: String,
         text: String,
     },
 }
 
-impl TimelineEntry {
-    fn start_ms(&self) -> u64 {
-        match self {
-            Self::Transcription { start_ms, .. } => *start_ms,
-            Self::Accessibility { elapsed_ms, .. } => *elapsed_ms,
-        }
-    }
+fn compact_timeline_text(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
 
-    fn sort_rank(&self) -> u8 {
-        match self {
-            Self::Transcription { .. } => 0,
-            Self::Accessibility { .. } => 1,
-        }
+fn accessibility_hint_location(app_name: &str, window_title: &str) -> String {
+    let app_name = compact_timeline_text(app_name);
+    let window_title = compact_timeline_text(window_title);
+
+    match (app_name.is_empty(), window_title.is_empty()) {
+        (false, true) => app_name,
+        (true, false) => window_title,
+        (true, true) => "Unknown".to_string(),
+        (false, false) if app_name == window_title => app_name,
+        (false, false) => format!("{} ({})", app_name, window_title),
     }
 }
 
-fn compact_timeline_text(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
+fn accessibility_hint_text(text: &str) -> String {
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    let mut lines = normalized
+        .lines()
+        .map(compact_timeline_text)
+        .collect::<Vec<_>>();
+
+    while lines.first().is_some_and(|line| line.is_empty()) {
+        lines.remove(0);
+    }
+    while lines.last().is_some_and(|line| line.is_empty()) {
+        lines.pop();
+    }
+
+    match lines.as_slice() {
+        [] => String::new(),
+        [line] => line.clone(),
+        _ => lines
+            .into_iter()
+            .map(|line| {
+                if line.is_empty() {
+                    ">".to_string()
+                } else {
+                    format!("> {}", line)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
 }
 
 fn format_timestamp(ms: u64) -> String {
@@ -145,11 +172,11 @@ fn build_accessibility_timeline(
         return None;
     }
 
-    let mut entries = Vec::new();
+    let mut transcription_entries = Vec::new();
     for segment in &transcription.segments {
         let text = compact_timeline_text(&segment.text);
         if !text.is_empty() {
-            entries.push(TimelineEntry::Transcription {
+            transcription_entries.push(TimelineEntry::Transcription {
                 start_ms: segment.start_ms,
                 end_ms: segment.end_ms,
                 text,
@@ -157,10 +184,10 @@ fn build_accessibility_timeline(
         }
     }
 
-    if entries.is_empty() {
+    if transcription_entries.is_empty() {
         let text = compact_timeline_text(&transcription.text);
         if !text.is_empty() {
-            entries.push(TimelineEntry::Transcription {
+            transcription_entries.push(TimelineEntry::Transcription {
                 start_ms: 0,
                 end_ms: 0,
                 text,
@@ -168,70 +195,162 @@ fn build_accessibility_timeline(
         }
     }
 
-    for event in accessibility_events {
-        let text = compact_timeline_text(&event.text);
+    transcription_entries.sort_by_key(|entry| match entry {
+        TimelineEntry::Transcription { start_ms, .. } => *start_ms,
+        TimelineEntry::Accessibility { .. } => unreachable!("only transcription entries here"),
+    });
+
+    let mut accessibility_entries = Vec::new();
+    for event in deduplicate_accessibility_events(accessibility_events) {
+        let text = accessibility_hint_text(&event.text);
         if !text.is_empty() {
-            entries.push(TimelineEntry::Accessibility {
+            accessibility_entries.push(TimelineEntry::Accessibility {
                 elapsed_ms: event.elapsed_ms,
                 app_name: event.app_name.clone(),
                 window_title: event.window_title.clone(),
-                element: event.element.clone(),
                 text,
             });
         }
     }
 
-    if entries.is_empty() {
+    accessibility_entries.sort_by_key(|entry| match entry {
+        TimelineEntry::Accessibility { elapsed_ms, .. } => *elapsed_ms,
+        TimelineEntry::Transcription { .. } => unreachable!("only accessibility entries here"),
+    });
+
+    if transcription_entries.is_empty() && accessibility_entries.is_empty() {
         return None;
     }
 
-    entries.sort_by_key(|entry| (entry.start_ms(), entry.sort_rank()));
+    let mut output = String::new();
+    let mut transcription_index = 0;
 
-    let mut output = String::from(
-        "Ordered timeline. Transcription lines are dictated speech. Hint lines are screen context from macOS Accessibility; use them only as context.\n\n",
-    );
+    for entry in accessibility_entries {
+        let TimelineEntry::Accessibility {
+            elapsed_ms,
+            app_name,
+            window_title,
+            text,
+        } = entry
+        else {
+            unreachable!("only accessibility entries here");
+        };
 
-    for entry in entries {
-        match entry {
-            TimelineEntry::Transcription {
-                start_ms,
-                end_ms,
-                text,
-            } if end_ms > start_ms => {
-                output.push_str(&format!(
-                    "[{}-{}] Transcription: {}\n",
-                    format_timestamp(start_ms),
-                    format_timestamp(end_ms),
-                    text
-                ));
+        append_transcription_until(
+            &mut output,
+            &transcription_entries,
+            &mut transcription_index,
+            elapsed_ms,
+        );
+        append_accessibility_entry(&mut output, elapsed_ms, &app_name, &window_title, &text);
+    }
+
+    append_remaining_transcription(&mut output, &transcription_entries, transcription_index);
+
+    if output.is_empty() {
+        None
+    } else {
+        Some(output)
+    }
+}
+
+fn append_transcription_until(
+    output: &mut String,
+    entries: &[TimelineEntry],
+    index: &mut usize,
+    boundary_ms: u64,
+) {
+    let start_index = *index;
+    while *index < entries.len() {
+        match &entries[*index] {
+            TimelineEntry::Transcription { start_ms, .. } if *start_ms < boundary_ms => {
+                *index += 1;
             }
-            TimelineEntry::Transcription { start_ms, text, .. } => {
-                output.push_str(&format!(
-                    "[{}] Transcription: {}\n",
-                    format_timestamp(start_ms),
-                    text
-                ));
-            }
-            TimelineEntry::Accessibility {
-                elapsed_ms,
-                app_name,
-                window_title,
-                element,
-                text,
-            } => {
-                output.push_str(&format!(
-                    "[{}] Hint: Application: {} | Window: {} | Element: {} | Text: {}\n",
-                    format_timestamp(elapsed_ms),
-                    app_name,
-                    window_title,
-                    element,
-                    text
-                ));
-            }
+            TimelineEntry::Transcription { .. } => break,
+            TimelineEntry::Accessibility { .. } => unreachable!("only transcription entries here"),
         }
     }
 
-    Some(output)
+    append_transcription_group(output, &entries[start_index..*index]);
+}
+
+fn append_remaining_transcription(
+    output: &mut String,
+    entries: &[TimelineEntry],
+    start_index: usize,
+) {
+    append_transcription_group(output, &entries[start_index..]);
+}
+
+fn append_transcription_group(output: &mut String, entries: &[TimelineEntry]) {
+    let mut start_ms = None;
+    let mut end_ms = None;
+    let mut text_parts = Vec::new();
+
+    for entry in entries {
+        let TimelineEntry::Transcription {
+            start_ms: entry_start_ms,
+            end_ms: entry_end_ms,
+            text,
+        } = entry
+        else {
+            unreachable!("only transcription entries here");
+        };
+
+        if text.trim().is_empty() {
+            continue;
+        }
+
+        start_ms.get_or_insert(*entry_start_ms);
+        end_ms = Some(*entry_end_ms);
+        text_parts.push(text.as_str());
+    }
+
+    let Some(start_ms) = start_ms else {
+        return;
+    };
+    let end_ms = end_ms.unwrap_or(start_ms);
+    let text = compact_timeline_text(&text_parts.join(" "));
+
+    if end_ms > start_ms {
+        output.push_str(&format!(
+            "[{}-{}] Transcription: {}\n",
+            format_timestamp(start_ms),
+            format_timestamp(end_ms),
+            text
+        ));
+    } else {
+        output.push_str(&format!(
+            "[{}] Transcription: {}\n",
+            format_timestamp(start_ms),
+            text
+        ));
+    }
+}
+
+fn append_accessibility_entry(
+    output: &mut String,
+    elapsed_ms: u64,
+    app_name: &str,
+    window_title: &str,
+    text: &str,
+) {
+    let location = accessibility_hint_location(app_name, window_title);
+    if text.contains('\n') {
+        output.push_str(&format!(
+            "[{}] Hint: {} - selected element:\n{}\n",
+            format_timestamp(elapsed_ms),
+            location,
+            text
+        ));
+    } else {
+        output.push_str(&format!(
+            "[{}] Hint: {} - selected element: {}\n",
+            format_timestamp(elapsed_ms),
+            location,
+            text
+        ));
+    }
 }
 
 async fn complete_unless_cancelled<F, C>(operation: F, is_cancelled: C) -> Option<F::Output>
@@ -348,6 +467,17 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
                 }
 
                 let token_limit = model.trim().parse::<i32>().unwrap_or(0);
+                crate::llm_client::log_debug_llm_payload(
+                    "Apple Intelligence post-processing request",
+                    &serde_json::json!({
+                        "provider": &provider.id,
+                        "model": &model,
+                        "system_prompt": &system_prompt,
+                        "user_content": &user_content,
+                        "max_tokens": token_limit,
+                    }),
+                );
+
                 return match apple_intelligence::process_text_with_system_prompt(
                     &system_prompt,
                     &user_content,
@@ -803,7 +933,7 @@ impl ShortcutAction for TranscribeAction {
                         // current live-streaming path only returns final text, so close
                         // the stream worker first, then batch-transcribe with segments.
                         match tm.finalize_stream() {
-                            Ok(_) => tm.transcribe_detailed(samples),
+                            Ok(_) => tm.transcribe_detailed_for_context(samples),
                             Err(err) => Err(err),
                         }
                     } else {
@@ -1122,18 +1252,181 @@ mod tests {
 
         let timeline = build_accessibility_timeline(&transcription, &accessibility_events).unwrap();
 
+        assert!(!timeline.contains("Ordered timeline"));
         assert!(timeline.contains("[00:00.000-00:00.900] Transcription: open this"));
-        assert!(timeline.contains(
-            "[00:01.000] Hint: Application: Google Chrome | Window: Example | Element: AXButton | Text: Submit"
-        ));
+        assert!(timeline
+            .contains("[00:01.000] Hint: Google Chrome (Example) - selected element: Submit"));
         assert!(timeline.contains("[00:01.500-00:02.000] Transcription: button"));
         assert!(
             timeline.find("Transcription: open this").unwrap()
-                < timeline.find("Hint: Application").unwrap()
+                < timeline.find("Hint: Google Chrome").unwrap()
         );
         assert!(
-            timeline.find("Hint: Application").unwrap()
+            timeline.find("Hint: Google Chrome").unwrap()
                 < timeline.find("Transcription: button").unwrap()
+        );
+    }
+
+    #[test]
+    fn accessibility_timeline_uses_only_app_name_when_window_matches() {
+        let transcription = TranscriptionOutput {
+            text: "look here".to_string(),
+            segments: vec![],
+        };
+        let accessibility_events = vec![AccessibilityContextEvent {
+            elapsed_ms: 250,
+            app_name: "Ghosty".to_string(),
+            window_title: "Ghosty".to_string(),
+            element: "AXGroup".to_string(),
+            text: "Terminal content area".to_string(),
+        }];
+
+        let timeline = build_accessibility_timeline(&transcription, &accessibility_events).unwrap();
+
+        assert!(
+            timeline.contains("[00:00.250] Hint: Ghosty - selected element: Terminal content area")
+        );
+        assert!(!timeline.contains("Hint: Ghosty (Ghosty)"));
+        assert!(!timeline.contains("Application:"));
+        assert!(!timeline.contains("Window:"));
+        assert!(!timeline.contains("Element:"));
+    }
+
+    #[test]
+    fn accessibility_timeline_quotes_multiline_selected_text() {
+        let transcription = TranscriptionOutput {
+            text: "summarize this".to_string(),
+            segments: vec![],
+        };
+        let accessibility_events = vec![AccessibilityContextEvent {
+            elapsed_ms: 500,
+            app_name: "Notes".to_string(),
+            window_title: "Meeting Notes".to_string(),
+            element: "AXTextArea".to_string(),
+            text: "first line\nsecond line\n\nfourth line".to_string(),
+        }];
+
+        let timeline = build_accessibility_timeline(&transcription, &accessibility_events).unwrap();
+
+        assert!(timeline.contains(
+            "[00:00.500] Hint: Notes (Meeting Notes) - selected element:\n> first line\n> second line\n>\n> fourth line"
+        ));
+    }
+
+    #[test]
+    fn accessibility_timeline_keeps_only_latest_expanded_selection_hint() {
+        let transcription = TranscriptionOutput {
+            text: "use this context".to_string(),
+            segments: vec![],
+        };
+        let accessibility_events = vec![
+            AccessibilityContextEvent {
+                elapsed_ms: 100,
+                app_name: "Notes".to_string(),
+                window_title: "Draft".to_string(),
+                element: "Selected text".to_string(),
+                text: "alpha".to_string(),
+            },
+            AccessibilityContextEvent {
+                elapsed_ms: 200,
+                app_name: "Notes".to_string(),
+                window_title: "Draft".to_string(),
+                element: "Selected text".to_string(),
+                text: "alpha beta".to_string(),
+            },
+            AccessibilityContextEvent {
+                elapsed_ms: 300,
+                app_name: "Notes".to_string(),
+                window_title: "Draft".to_string(),
+                element: "Selected text".to_string(),
+                text: "alpha beta gamma".to_string(),
+            },
+        ];
+
+        let timeline = build_accessibility_timeline(&transcription, &accessibility_events).unwrap();
+
+        assert!(!timeline.contains("[00:00.100] Hint:"));
+        assert!(!timeline.contains("[00:00.200] Hint:"));
+        assert!(timeline
+            .contains("[00:00.300] Hint: Notes (Draft) - selected element: alpha beta gamma"));
+    }
+
+    #[test]
+    fn accessibility_timeline_splits_transcription_at_hint_boundaries() {
+        let transcription = TranscriptionOutput {
+            text: "Vale y sigo hablando despues final".to_string(),
+            segments: vec![
+                TranscriptionSegment {
+                    start_ms: 0,
+                    end_ms: 500,
+                    text: "Vale".to_string(),
+                },
+                TranscriptionSegment {
+                    start_ms: 700,
+                    end_ms: 900,
+                    text: "y".to_string(),
+                },
+                TranscriptionSegment {
+                    start_ms: 1_200,
+                    end_ms: 1_500,
+                    text: "sigo".to_string(),
+                },
+                TranscriptionSegment {
+                    start_ms: 1_600,
+                    end_ms: 2_000,
+                    text: "hablando".to_string(),
+                },
+                TranscriptionSegment {
+                    start_ms: 4_200,
+                    end_ms: 4_700,
+                    text: "despues".to_string(),
+                },
+                TranscriptionSegment {
+                    start_ms: 5_000,
+                    end_ms: 5_500,
+                    text: "final".to_string(),
+                },
+            ],
+        };
+        let accessibility_events = vec![
+            AccessibilityContextEvent {
+                elapsed_ms: 1_000,
+                app_name: "Helium".to_string(),
+                window_title: "".to_string(),
+                element: "Selected text".to_string(),
+                text: "automation".to_string(),
+            },
+            AccessibilityContextEvent {
+                elapsed_ms: 4_000,
+                app_name: "Helium".to_string(),
+                window_title: "".to_string(),
+                element: "Selected text".to_string(),
+                text: "script".to_string(),
+            },
+        ];
+
+        let timeline = build_accessibility_timeline(&transcription, &accessibility_events).unwrap();
+
+        assert!(timeline.contains("[00:00.000-00:00.900] Transcription: Vale y"));
+        assert!(timeline.contains("[00:01.000] Hint: Helium - selected element: automation"));
+        assert!(timeline.contains("[00:01.200-00:02.000] Transcription: sigo hablando"));
+        assert!(timeline.contains("[00:04.000] Hint: Helium - selected element: script"));
+        assert!(timeline.contains("[00:04.200-00:05.500] Transcription: despues final"));
+        assert!(
+            timeline.find("Transcription: Vale y").unwrap()
+                < timeline.find("selected element: automation").unwrap()
+        );
+        assert!(
+            timeline.find("selected element: automation").unwrap()
+                < timeline.find("Transcription: sigo hablando").unwrap()
+        );
+        assert!(
+            timeline.find("Transcription: sigo hablando").unwrap()
+                < timeline.find("selected element: script").unwrap()
+        );
+        assert!(
+            timeline.find("selected element: script").unwrap()
+                < timeline.find("Transcription: despues final").unwrap()
         );
     }
 
