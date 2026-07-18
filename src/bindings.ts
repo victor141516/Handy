@@ -867,6 +867,21 @@ async unloadModelManually() : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Import an audio file, convert it to Handy's canonical WAV format, transcribe
+ * it with the selected model, and add it to the regular transcription history.
+ *
+ * Imported files deliberately never run post-processing or paste text into the
+ * focused application. Post-processing remains an explicit action in History.
+ */
+async transcribeAudioFile(path: string) : Promise<Result<HistoryEntry, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("transcribe_audio_file", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async getHistoryEntries(cursor: number | null, limit: number | null) : Promise<Result<PaginatedHistory, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_history_entries", { cursor, limit }) };

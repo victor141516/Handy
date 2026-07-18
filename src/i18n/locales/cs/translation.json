@@ -16,7 +16,8 @@
     "postProcessing": "Následné zpracování",
     "history": "Historie",
     "debug": "Ladění",
-    "about": "O aplikaci"
+    "about": "O aplikaci",
+    "audioFile": "Přepsat soubor"
   },
   "onboarding": {
     "subtitle": "Pro začátek vyberte model pro přepis",
@@ -730,5 +731,23 @@
     "learnMore": "Jak to vyřešit",
     "recorderBlocked": "Zkratky teď nelze nahrát — Secure Input v macOS blokuje události kláves. Nejprve vyřešte upozornění na Secure Input.",
     "dismiss": "Zavřít"
+  },
+  "audioFileTranscription": {
+    "title": "Přepis zvukového souboru",
+    "description": "Vyberte zvukový soubor k přepisu pomocí zvoleného modelu. Výsledek se uloží do Historie bez následného zpracování.",
+    "dialogTitle": "Vyberte zvukový soubor",
+    "audioFiles": "Zvukové soubory",
+    "noFileSelected": "Není vybrán žádný zvukový soubor",
+    "supportedFormats": "WAV, MP3, M4A, MP4, FLAC nebo OGG",
+    "chooseFile": "Vybrat zvukový soubor",
+    "chooseAnother": "Vybrat jiný soubor",
+    "transcribing": "Probíhá přepis…",
+    "cancel": "Zrušit",
+    "cancelling": "Rušení…",
+    "keepOpen": "Během zpracování zvuku ponechte Handy otevřený.",
+    "completed": "Přepis byl dokončen a uložen do Historie.",
+    "result": "Přepis",
+    "openHistory": "Otevřít Historii",
+    "error": "Zvukový soubor se nepodařilo přepsat. Podrobnosti najdete v protokolech; poté to zkuste znovu."
   }
 }

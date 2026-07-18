@@ -16,7 +16,8 @@
     "postProcessing": "后处理",
     "history": "历史记录",
     "debug": "调试",
-    "about": "关于"
+    "about": "关于",
+    "audioFile": "转录文件"
   },
   "onboarding": {
     "subtitle": "请选择一个转录模型以开始使用",
@@ -730,5 +731,23 @@
     "learnMore": "如何解决",
     "recorderBlocked": "当前无法录制快捷键——macOS 的 Secure Input 正在阻止按键事件。请先解决 Secure Input 警告。",
     "dismiss": "关闭"
+  },
+  "audioFileTranscription": {
+    "title": "转录音频文件",
+    "description": "选择要使用当前模型转录的音频文件。结果会直接保存到历史记录，不进行后处理。",
+    "dialogTitle": "选择音频文件",
+    "audioFiles": "音频文件",
+    "noFileSelected": "尚未选择音频文件",
+    "supportedFormats": "WAV、MP3、M4A、MP4、FLAC 或 OGG",
+    "chooseFile": "选择音频文件",
+    "chooseAnother": "选择其他文件",
+    "transcribing": "正在转录…",
+    "cancel": "取消",
+    "cancelling": "正在取消…",
+    "keepOpen": "处理音频时请保持 Handy 开启。",
+    "completed": "转录完成并已保存到历史记录。",
+    "result": "转录内容",
+    "openHistory": "打开历史记录",
+    "error": "无法转录音频文件。请查看日志了解详细信息，然后重试。"
   }
 }

@@ -16,7 +16,8 @@
     "postProcessing": "Naverwerking",
     "history": "Geschiedenis",
     "debug": "Probleemoplossing",
-    "about": "Over Handy"
+    "about": "Over Handy",
+    "audioFile": "Bestand transcriberen"
   },
   "onboarding": {
     "subtitle": "Kies een transcriptiemodel om aan de slag te gaan",
@@ -730,5 +731,23 @@
     "learnMore": "Hoe je dit oplost",
     "recorderBlocked": "Sneltoetsen kunnen nu niet worden opgenomen — Secure Input van macOS blokkeert toetsgebeurtenissen. Los eerst de Secure Input-waarschuwing op.",
     "dismiss": "Sluiten"
+  },
+  "audioFileTranscription": {
+    "title": "Audiobestand transcriberen",
+    "description": "Kies een audiobestand om met het geselecteerde model te transcriberen. Het resultaat wordt zonder nabewerking in de geschiedenis opgeslagen.",
+    "dialogTitle": "Kies een audiobestand",
+    "audioFiles": "Audiobestanden",
+    "noFileSelected": "Geen audiobestand geselecteerd",
+    "supportedFormats": "WAV, MP3, M4A, MP4, FLAC of OGG",
+    "chooseFile": "Audiobestand kiezen",
+    "chooseAnother": "Ander bestand kiezen",
+    "transcribing": "Transcriberen…",
+    "cancel": "Annuleren",
+    "cancelling": "Annuleren…",
+    "keepOpen": "Houd Handy open terwijl de audio wordt verwerkt.",
+    "completed": "Transcriptie voltooid en opgeslagen in de geschiedenis.",
+    "result": "Transcriptie",
+    "openHistory": "Geschiedenis openen",
+    "error": "Het audiobestand kon niet worden getranscribeerd. Controleer de logboeken en probeer het opnieuw."
   }
 }

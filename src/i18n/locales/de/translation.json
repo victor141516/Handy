@@ -16,7 +16,8 @@
     "postProcessing": "Nachbearbeitung",
     "history": "Verlauf",
     "debug": "Debug",
-    "about": "Info"
+    "about": "Info",
+    "audioFile": "Datei transkribieren"
   },
   "onboarding": {
     "subtitle": "Wähle ein Transkriptionsmodell, um loszulegen",
@@ -730,5 +731,23 @@
     "learnMore": "So behebst du das",
     "recorderBlocked": "Tastenkürzel können gerade nicht aufgezeichnet werden — macOS Secure Input blockiert Tastenereignisse. Behebe zuerst die Secure-Input-Warnung.",
     "dismiss": "Ausblenden"
+  },
+  "audioFileTranscription": {
+    "title": "Audiodatei transkribieren",
+    "description": "Wähle eine Audiodatei aus, die mit dem ausgewählten Modell transkribiert werden soll. Das Ergebnis wird ohne Nachbearbeitung im Verlauf gespeichert.",
+    "dialogTitle": "Audiodatei auswählen",
+    "audioFiles": "Audiodateien",
+    "noFileSelected": "Keine Audiodatei ausgewählt",
+    "supportedFormats": "WAV, MP3, M4A, MP4, FLAC oder OGG",
+    "chooseFile": "Audiodatei auswählen",
+    "chooseAnother": "Andere Datei auswählen",
+    "transcribing": "Transkription läuft…",
+    "cancel": "Abbrechen",
+    "cancelling": "Wird abgebrochen…",
+    "keepOpen": "Lass Handy geöffnet, während die Audiodatei verarbeitet wird.",
+    "completed": "Die Transkription wurde abgeschlossen und im Verlauf gespeichert.",
+    "result": "Transkription",
+    "openHistory": "Verlauf öffnen",
+    "error": "Die Audiodatei konnte nicht transkribiert werden. Prüfe die Protokolle und versuche es erneut."
   }
 }

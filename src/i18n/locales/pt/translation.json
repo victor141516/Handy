@@ -16,7 +16,8 @@
     "postProcessing": "Pós-Processamento",
     "history": "Histórico",
     "debug": "Depuração",
-    "about": "Sobre"
+    "about": "Sobre",
+    "audioFile": "Transcrever ficheiro"
   },
   "onboarding": {
     "subtitle": "Para começar, escolha um modelo de transcrição",
@@ -730,5 +731,23 @@
     "learnMore": "Como resolver isso",
     "recorderBlocked": "Não é possível gravar atalhos agora — o Secure Input do macOS está bloqueando os eventos de tecla. Resolva primeiro o aviso do Secure Input.",
     "dismiss": "Dispensar"
+  },
+  "audioFileTranscription": {
+    "title": "Transcrever ficheiro de áudio",
+    "description": "Escolha um ficheiro de áudio para transcrever com o modelo selecionado. O resultado é guardado no histórico sem pós-processamento.",
+    "dialogTitle": "Escolher um ficheiro de áudio",
+    "audioFiles": "Ficheiros de áudio",
+    "noFileSelected": "Nenhum ficheiro de áudio selecionado",
+    "supportedFormats": "WAV, MP3, M4A, MP4, FLAC ou OGG",
+    "chooseFile": "Escolher ficheiro de áudio",
+    "chooseAnother": "Escolher outro ficheiro",
+    "transcribing": "A transcrever…",
+    "cancel": "Cancelar",
+    "cancelling": "A cancelar…",
+    "keepOpen": "Mantenha o Handy aberto enquanto o áudio é processado.",
+    "completed": "Transcrição concluída e guardada no histórico.",
+    "result": "Transcrição",
+    "openHistory": "Abrir histórico",
+    "error": "Não foi possível transcrever o ficheiro de áudio. Consulte os registos para obter detalhes e tente novamente."
   }
 }

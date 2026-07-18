@@ -16,7 +16,8 @@
     "postProcessing": "Xử lý sau",
     "history": "Lịch sử",
     "debug": "Gỡ lỗi",
-    "about": "Giới thiệu"
+    "about": "Giới thiệu",
+    "audioFile": "Chép lời tệp"
   },
   "onboarding": {
     "subtitle": "Để bắt đầu, hãy chọn một mô hình chuyển đổi giọng nói",
@@ -730,5 +731,23 @@
     "learnMore": "Cách khắc phục",
     "recorderBlocked": "Hiện không thể ghi phím tắt — Secure Input của macOS đang chặn các sự kiện phím. Hãy xử lý cảnh báo Secure Input trước.",
     "dismiss": "Bỏ qua"
+  },
+  "audioFileTranscription": {
+    "title": "Chép lời tệp âm thanh",
+    "description": "Chọn tệp âm thanh để chép lời bằng mô hình đã chọn. Kết quả được lưu vào lịch sử mà không qua xử lý hậu kỳ.",
+    "dialogTitle": "Chọn tệp âm thanh",
+    "audioFiles": "Tệp âm thanh",
+    "noFileSelected": "Chưa chọn tệp âm thanh",
+    "supportedFormats": "WAV, MP3, M4A, MP4, FLAC hoặc OGG",
+    "chooseFile": "Chọn tệp âm thanh",
+    "chooseAnother": "Chọn tệp khác",
+    "transcribing": "Đang chép lời…",
+    "cancel": "Hủy",
+    "cancelling": "Đang hủy…",
+    "keepOpen": "Hãy giữ Handy mở trong khi xử lý âm thanh.",
+    "completed": "Đã chép lời và lưu vào lịch sử.",
+    "result": "Bản chép lời",
+    "openHistory": "Mở lịch sử",
+    "error": "Không thể chép lời tệp âm thanh. Hãy kiểm tra nhật ký để biết chi tiết rồi thử lại."
   }
 }

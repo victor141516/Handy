@@ -16,7 +16,8 @@
     "history": "السجل",
     "debug": "تصحيح الأخطاء",
     "about": "حول",
-    "models": "النماذج"
+    "models": "النماذج",
+    "audioFile": "نسخ ملف صوتي"
   },
   "onboarding": {
     "subtitle": "للبدء، اختر نموذج التفريغ الصوتي",
@@ -730,5 +731,23 @@
     "learnMore": "كيفية الإصلاح",
     "recorderBlocked": "لا يمكن تسجيل الاختصارات الآن — يحجب Secure Input في macOS أحداث المفاتيح. عالج تحذير Secure Input أولاً.",
     "dismiss": "تجاهل"
+  },
+  "audioFileTranscription": {
+    "title": "نسخ ملف صوتي",
+    "description": "اختر ملفًا صوتيًا لنسخه باستخدام النموذج المحدد. تُحفظ النتيجة في السجل دون معالجة لاحقة.",
+    "dialogTitle": "اختر ملفًا صوتيًا",
+    "audioFiles": "ملفات صوتية",
+    "noFileSelected": "لم يتم تحديد ملف صوتي",
+    "supportedFormats": "WAV أو MP3 أو M4A أو MP4 أو FLAC أو OGG",
+    "chooseFile": "اختيار ملف صوتي",
+    "chooseAnother": "اختيار ملف آخر",
+    "transcribing": "جارٍ النسخ…",
+    "cancel": "إلغاء",
+    "cancelling": "جارٍ الإلغاء…",
+    "keepOpen": "أبقِ Handy مفتوحًا أثناء معالجة الصوت.",
+    "completed": "اكتمل النسخ وحُفظ في السجل.",
+    "result": "النص المنسوخ",
+    "openHistory": "فتح السجل",
+    "error": "تعذر نسخ الملف الصوتي. راجع السجلات لمزيد من التفاصيل وحاول مرة أخرى."
   }
 }

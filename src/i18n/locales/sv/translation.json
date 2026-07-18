@@ -16,7 +16,8 @@
     "postProcessing": "Efterbearbetning",
     "history": "Historik",
     "debug": "Felsökning",
-    "about": "Om"
+    "about": "Om",
+    "audioFile": "Transkribera fil"
   },
   "onboarding": {
     "subtitle": "För att komma igång, välj en transkriptionsmodell",
@@ -730,5 +731,23 @@
     "learnMore": "Så här löser du det",
     "recorderBlocked": "Det går inte att spela in kortkommandon just nu — macOS Secure Input blockerar tangenthändelser. Lös varningen om Secure Input först.",
     "dismiss": "Avfärda"
+  },
+  "audioFileTranscription": {
+    "title": "Transkribera ljudfil",
+    "description": "Välj en ljudfil som ska transkriberas med den valda modellen. Resultatet sparas i historiken utan efterbehandling.",
+    "dialogTitle": "Välj en ljudfil",
+    "audioFiles": "Ljudfiler",
+    "noFileSelected": "Ingen ljudfil har valts",
+    "supportedFormats": "WAV, MP3, M4A, MP4, FLAC eller OGG",
+    "chooseFile": "Välj ljudfil",
+    "chooseAnother": "Välj en annan fil",
+    "transcribing": "Transkriberar…",
+    "cancel": "Avbryt",
+    "cancelling": "Avbryter…",
+    "keepOpen": "Håll Handy öppet medan ljudet bearbetas.",
+    "completed": "Transkriberingen är klar och sparad i historiken.",
+    "result": "Transkribering",
+    "openHistory": "Öppna historiken",
+    "error": "Ljudfilen kunde inte transkriberas. Kontrollera loggarna och försök igen."
   }
 }
