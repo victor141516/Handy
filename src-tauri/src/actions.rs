@@ -976,12 +976,12 @@ impl ShortcutAction for TranscribeAction {
                         // Accessibility timelines need real segment timestamps. The
                         // current live-streaming path only returns final text, so close
                         // the stream worker first, then batch-transcribe with segments.
-                        match tm.finalize_stream() {
+                        match tm.finalize_stream_retaining_model() {
                             Ok(_) => tm.transcribe_detailed_for_context(samples),
                             Err(err) => Err(err),
                         }
                     } else {
-                        match tm.finalize_stream() {
+                        match tm.finalize_stream_retaining_model() {
                             // A finalized stream with usable text wins. An empty result
                             // (no active stream, produced nothing, or a finalize error
                             // after the engine was returned) falls back to a full batch
@@ -989,6 +989,7 @@ impl ShortcutAction for TranscribeAction {
                             // surfaced instead — the worker may still hold the engine,
                             // so a batch fallback would contend with it.
                             Ok(Some(text)) if !text.trim().is_empty() => {
+                                tm.maybe_unload_immediately("streaming transcription");
                                 Ok(TranscriptionOutput::text_only(text, sample_count))
                             }
                             Ok(_) => tm.transcribe_detailed(samples),

@@ -9,6 +9,7 @@ use anyhow::Result;
 use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use specta::Type;
+use std::num::NonZeroUsize;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex, MutexGuard, OnceLock};
@@ -35,6 +36,16 @@ use transcribe_rs::{
 
 const STREAM_PERF_LOG_INTERVAL: Duration = Duration::from_secs(5);
 const STREAM_FINALIZE_REPLY_TIMEOUT: Duration = Duration::from_secs(30);
+const LONG_AUDIO_BATCH_THRESHOLD_SECONDS: usize = 120;
+const LONG_AUDIO_CHUNK_SECONDS: usize = 30;
+const TRANSCRIPTION_SAMPLE_RATE_HZ: usize = 16_000;
+const LONG_AUDIO_BATCH_THRESHOLD_SAMPLES: usize =
+    TRANSCRIPTION_SAMPLE_RATE_HZ * LONG_AUDIO_BATCH_THRESHOLD_SECONDS;
+const LONG_AUDIO_CHUNK_SAMPLES: NonZeroUsize =
+    match NonZeroUsize::new(TRANSCRIPTION_SAMPLE_RATE_HZ * LONG_AUDIO_CHUNK_SECONDS) {
+        Some(samples) => samples,
+        None => panic!("long audio chunk duration and sample rate must be non-zero"),
+    };
 #[derive(Clone, Debug, Serialize)]
 pub struct ModelStateEvent {
     pub event_type: String,
@@ -115,6 +126,12 @@ impl TranscriptionOutput {
 enum ModelRetention {
     ApplyUnloadPolicy,
     Retain,
+}
+
+#[derive(Clone, Copy)]
+struct ChunkPosition {
+    index: usize,
+    count: usize,
 }
 
 /// Commands sent to the streaming worker thread. Audio frames and the finalize
@@ -1079,7 +1096,9 @@ impl TranscriptionManager {
     /// to batch transcription. `Err` means finalize itself failed or timed out.
     /// A timeout may still leave the worker holding the engine, so callers
     /// should surface it instead of immediately starting a batch fallback.
-    pub fn finalize_stream(&self) -> Result<Option<String>> {
+    /// Finalize a stream while retaining its model for an immediate batch
+    /// fallback. The eventual stream result or batch owns applying unload policy.
+    pub fn finalize_stream_retaining_model(&self) -> Result<Option<String>> {
         let Some(tx) = self.router.take() else {
             return Ok(None);
         };
@@ -1105,7 +1124,6 @@ impl TranscriptionManager {
         // always go through the shared fuzzy post-correction path.
         let filtered = post_process_transcription_text(raw, &settings, false);
 
-        self.maybe_unload_immediately("streaming transcription");
         Ok(Some(filtered))
     }
 
@@ -1146,11 +1164,103 @@ impl TranscriptionManager {
     }
 
     pub fn transcribe_detailed(&self, audio: Vec<f32>) -> Result<TranscriptionOutput> {
-        self.transcribe_detailed_with_options(audio, false, ModelRetention::ApplyUnloadPolicy)
+        self.transcribe_bounded_batch(audio, false)
     }
 
     pub fn transcribe_detailed_for_context(&self, audio: Vec<f32>) -> Result<TranscriptionOutput> {
-        self.transcribe_detailed_with_options(audio, true, ModelRetention::ApplyUnloadPolicy)
+        self.transcribe_bounded_batch(audio, true)
+    }
+
+    fn transcribe_bounded_batch(
+        &self,
+        audio: Vec<f32>,
+        prefer_word_timestamps: bool,
+    ) -> Result<TranscriptionOutput> {
+        // A finalized stream may have applied the immediate-unload policy
+        // before asking for a batch fallback. This is a no-op when still loaded.
+        self.initiate_model_load();
+
+        if !should_chunk_long_audio(audio.len()) {
+            return self.transcribe_detailed_with_options(
+                audio,
+                prefer_word_timestamps,
+                ModelRetention::ApplyUnloadPolicy,
+            );
+        }
+
+        let chunk_count = audio.len().div_ceil(LONG_AUDIO_CHUNK_SAMPLES.get());
+        info!(
+            "Long recording batch transcription started: total_samples={}, duration_secs={:.2}, threshold_secs={}, chunk_seconds={}, chunks={}, detailed_timestamps={}",
+            audio.len(),
+            audio.len() as f64 / TRANSCRIPTION_SAMPLE_RATE_HZ as f64,
+            LONG_AUDIO_BATCH_THRESHOLD_SECONDS,
+            LONG_AUDIO_CHUNK_SECONDS,
+            chunk_count,
+            prefer_word_timestamps,
+        );
+
+        let started = Instant::now();
+        let mut combined = run_chunked_transcription(
+            &audio,
+            LONG_AUDIO_CHUNK_SAMPLES,
+            |chunk, position| {
+                self.transcribe_long_audio_chunk(chunk, position, prefer_word_timestamps)
+            },
+            |position, error| {
+                error!(
+                    "Long recording chunk failed: chunk={}/{}, error={}",
+                    position.index + 1,
+                    position.count,
+                    error,
+                );
+                self.maybe_unload_immediately("failed long recording batch transcription");
+            },
+        )?;
+
+        self.maybe_unload_immediately("long recording batch transcription");
+        info!(
+            "Long recording batch transcription completed: chunks={}, elapsed={:?}, chars={}, segments={}",
+            chunk_count,
+            started.elapsed(),
+            combined.text.len(),
+            combined.segments.len(),
+        );
+        combined.text.shrink_to_fit();
+        combined.segments.shrink_to_fit();
+        Ok(combined)
+    }
+
+    fn transcribe_long_audio_chunk(
+        &self,
+        chunk: Vec<f32>,
+        position: ChunkPosition,
+        prefer_word_timestamps: bool,
+    ) -> Result<TranscriptionOutput> {
+        let chunk_started = Instant::now();
+        let chunk_start_samples = position.index * LONG_AUDIO_CHUNK_SAMPLES.get();
+        info!(
+            "Long recording chunk started: chunk={}/{}, start_secs={:.2}, samples={}, pcm_bytes={}",
+            position.index + 1,
+            position.count,
+            chunk_start_samples as f64 / TRANSCRIPTION_SAMPLE_RATE_HZ as f64,
+            chunk.len(),
+            chunk.len().saturating_mul(std::mem::size_of::<f32>()),
+        );
+
+        let output = self.transcribe_detailed_with_options(
+            chunk,
+            prefer_word_timestamps,
+            ModelRetention::Retain,
+        )?;
+        info!(
+            "Long recording chunk finished: chunk={}/{}, elapsed={:?}, chars={}, segments={}",
+            position.index + 1,
+            position.count,
+            chunk_started.elapsed(),
+            output.text.len(),
+            output.segments.len(),
+        );
+        Ok(output)
     }
 
     fn transcribe_detailed_with_options(
@@ -1510,7 +1620,152 @@ impl TranscriptionManager {
 }
 
 fn audio_len_to_ms(audio_len: usize) -> u64 {
-    ((audio_len as f64 / 16_000.0) * 1000.0).round().max(0.0) as u64
+    ((audio_len as f64 / TRANSCRIPTION_SAMPLE_RATE_HZ as f64) * 1000.0)
+        .round()
+        .max(0.0) as u64
+}
+
+fn should_chunk_long_audio(sample_count: usize) -> bool {
+    sample_count > LONG_AUDIO_BATCH_THRESHOLD_SAMPLES
+}
+
+fn run_chunked_transcription<E, Transcribe, OnFailure>(
+    audio: &[f32],
+    chunk_samples: NonZeroUsize,
+    mut transcribe: Transcribe,
+    mut on_failure: OnFailure,
+) -> std::result::Result<TranscriptionOutput, E>
+where
+    Transcribe: FnMut(Vec<f32>, ChunkPosition) -> std::result::Result<TranscriptionOutput, E>,
+    OnFailure: FnMut(ChunkPosition, &E),
+{
+    let chunk_samples = chunk_samples.get();
+    let chunk_count = audio.len().div_ceil(chunk_samples);
+    let mut combined = TranscriptionOutput {
+        text: String::new(),
+        segments: Vec::new(),
+    };
+
+    for (chunk_index, chunk) in audio.chunks(chunk_samples).enumerate() {
+        let position = ChunkPosition {
+            index: chunk_index,
+            count: chunk_count,
+        };
+        match transcribe(chunk.to_vec(), position) {
+            Ok(output) => {
+                append_chunk_output(&mut combined, output, chunk_index * chunk_samples);
+            }
+            Err(error) => {
+                on_failure(position, &error);
+                return Err(error);
+            }
+        }
+    }
+
+    Ok(combined)
+}
+
+fn append_chunk_output(
+    combined: &mut TranscriptionOutput,
+    mut chunk: TranscriptionOutput,
+    chunk_start_samples: usize,
+) {
+    let offset_ms = audio_len_to_ms(chunk_start_samples);
+    for segment in &mut chunk.segments {
+        segment.start_ms = segment.start_ms.saturating_add(offset_ms);
+        segment.end_ms = segment.end_ms.saturating_add(offset_ms);
+    }
+
+    let chunk_text = chunk.text.trim();
+    if !chunk_text.is_empty() {
+        if should_separate_chunk_text(&combined.text, chunk_text) {
+            combined.text.push(' ');
+        }
+        combined.text.push_str(chunk_text);
+    }
+    combined.segments.append(&mut chunk.segments);
+}
+
+fn should_separate_chunk_text(combined: &str, next: &str) -> bool {
+    let Some(previous_char) = combined.chars().next_back() else {
+        return false;
+    };
+    let Some(next_char) = next.chars().next() else {
+        return false;
+    };
+
+    if previous_char.is_whitespace() || next_char.is_whitespace() {
+        return false;
+    }
+    if is_opening_punctuation(previous_char) || is_closing_punctuation(next_char) {
+        return false;
+    }
+    !(is_cjk_character(previous_char) && is_cjk_character(next_char))
+}
+
+fn is_opening_punctuation(character: char) -> bool {
+    matches!(
+        character,
+        '(' | '['
+            | '{'
+            | '¿'
+            | '¡'
+            | '«'
+            | '（'
+            | '「'
+            | '『'
+            | '【'
+            | '《'
+            | '〈'
+            | '〔'
+            | '〖'
+            | '〘'
+            | '〚'
+    )
+}
+
+fn is_closing_punctuation(character: char) -> bool {
+    matches!(
+        character,
+        '.' | ','
+            | '!'
+            | '?'
+            | ';'
+            | ':'
+            | ')'
+            | ']'
+            | '}'
+            | '»'
+            | '…'
+            | '，'
+            | '。'
+            | '！'
+            | '？'
+            | '；'
+            | '：'
+            | '、'
+            | '）'
+            | '」'
+            | '』'
+            | '】'
+            | '》'
+            | '〉'
+            | '〕'
+            | '〗'
+            | '〙'
+            | '〛'
+    )
+}
+
+fn is_cjk_character(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x3040..=0x30ff
+            | 0x3400..=0x4dbf
+            | 0x4e00..=0x9fff
+            | 0xf900..=0xfaff
+            | 0x20000..=0x2fa1f
+    )
 }
 
 fn seconds_to_ms(seconds: f32) -> u64 {
@@ -2134,6 +2389,97 @@ mod tests {
             text: text.to_string(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn long_audio_batching_starts_only_above_the_threshold() {
+        assert!(!should_chunk_long_audio(LONG_AUDIO_BATCH_THRESHOLD_SAMPLES));
+        assert!(should_chunk_long_audio(
+            LONG_AUDIO_BATCH_THRESHOLD_SAMPLES + 1
+        ));
+        assert!(LONG_AUDIO_BATCH_THRESHOLD_SAMPLES > LONG_AUDIO_CHUNK_SAMPLES.get());
+    }
+
+    #[test]
+    fn chunk_outputs_are_joined_and_timestamps_are_offset() {
+        let mut combined = TranscriptionOutput {
+            text: String::new(),
+            segments: Vec::new(),
+        };
+        append_chunk_output(
+            &mut combined,
+            TranscriptionOutput {
+                text: " first ".to_string(),
+                segments: vec![TranscriptionSegment {
+                    start_ms: 100,
+                    end_ms: 500,
+                    text: "first".to_string(),
+                }],
+            },
+            0,
+        );
+        append_chunk_output(
+            &mut combined,
+            TranscriptionOutput {
+                text: "second".to_string(),
+                segments: vec![TranscriptionSegment {
+                    start_ms: 0,
+                    end_ms: 400,
+                    text: "second".to_string(),
+                }],
+            },
+            LONG_AUDIO_CHUNK_SAMPLES.get(),
+        );
+
+        assert_eq!(combined.text, "first second");
+        assert_eq!(combined.segments.len(), 2);
+        assert_eq!(
+            (combined.segments[1].start_ms, combined.segments[1].end_ms),
+            (30_000, 30_400)
+        );
+    }
+
+    #[test]
+    fn chunk_text_joining_preserves_punctuation_and_cjk_spacing() {
+        assert!(should_separate_chunk_text("hello", "world"));
+        assert!(!should_separate_chunk_text("hello", ", world"));
+        assert!(!should_separate_chunk_text("¿", "Qué tal?"));
+        assert!(!should_separate_chunk_text("你好", "世界"));
+        assert!(!should_separate_chunk_text("これは", "テスト"));
+        assert!(should_separate_chunk_text("He said \"yes\"", "then left"));
+        assert!(!should_separate_chunk_text("「", "你好"));
+        assert!(!should_separate_chunk_text("你好", "」"));
+    }
+
+    #[test]
+    fn chunk_failure_stops_the_batch_and_runs_cleanup_hook() {
+        let completed_chunks = std::cell::Cell::new(0);
+        let cleaned_up_chunk = std::cell::Cell::new(None);
+        let audio = vec![0.25; 6];
+
+        let result = run_chunked_transcription(
+            &audio,
+            NonZeroUsize::new(2).unwrap(),
+            |_, position| {
+                if position.index == 1 {
+                    return Err("simulated failure");
+                }
+                completed_chunks.set(completed_chunks.get() + 1);
+                Ok(TranscriptionOutput::text_only(
+                    format!("part {}", position.index),
+                    2,
+                ))
+            },
+            |position, error| {
+                assert_eq!(position.count, 3);
+                assert_eq!(*error, "simulated failure");
+                cleaned_up_chunk.set(Some(position.index));
+            },
+        );
+
+        assert!(matches!(result, Err("simulated failure")));
+        assert_eq!(completed_chunks.get(), 1);
+        assert_eq!(cleaned_up_chunk.get(), Some(1));
     }
 
     #[test]
