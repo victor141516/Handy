@@ -126,6 +126,12 @@ impl TranscriptionOutput {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ModelRetention {
+    ApplyUnloadPolicy,
+    Retain,
+}
+
 /// Commands sent to the streaming worker thread. Audio frames and the finalize
 /// request travel the same channel so FIFO ordering guarantees every fed frame
 /// is processed before finalize runs.
@@ -1214,18 +1220,26 @@ impl TranscriptionManager {
         self.transcribe_detailed(audio).map(|output| output.text)
     }
 
+    /// Transcribe one part of a larger operation without applying the user's
+    /// immediate-unload policy between parts.
+    pub fn transcribe_retaining_model(&self, audio: Vec<f32>) -> Result<String> {
+        self.transcribe_detailed_with_options(audio, false, ModelRetention::Retain)
+            .map(|output| output.text)
+    }
+
     pub fn transcribe_detailed(&self, audio: Vec<f32>) -> Result<TranscriptionOutput> {
-        self.transcribe_detailed_with_options(audio, false)
+        self.transcribe_detailed_with_options(audio, false, ModelRetention::ApplyUnloadPolicy)
     }
 
     pub fn transcribe_detailed_for_context(&self, audio: Vec<f32>) -> Result<TranscriptionOutput> {
-        self.transcribe_detailed_with_options(audio, true)
+        self.transcribe_detailed_with_options(audio, true, ModelRetention::ApplyUnloadPolicy)
     }
 
     fn transcribe_detailed_with_options(
         &self,
         audio: Vec<f32>,
         prefer_word_timestamps: bool,
+        model_retention: ModelRetention,
     ) -> Result<TranscriptionOutput> {
         #[cfg(debug_assertions)]
         if std::env::var("HANDY_FORCE_TRANSCRIPTION_FAILURE").is_ok() {
@@ -1244,7 +1258,9 @@ impl TranscriptionManager {
 
         if audio.is_empty() {
             debug!("Empty audio vector");
-            self.maybe_unload_immediately("empty audio");
+            if matches!(model_retention, ModelRetention::ApplyUnloadPolicy) {
+                self.maybe_unload_immediately("empty audio");
+            }
             return Ok(TranscriptionOutput::text_only(String::new(), 0));
         }
 
@@ -1589,7 +1605,9 @@ impl TranscriptionManager {
             );
         }
 
-        self.maybe_unload_immediately("transcription");
+        if matches!(model_retention, ModelRetention::ApplyUnloadPolicy) {
+            self.maybe_unload_immediately("transcription");
+        }
 
         Ok(output)
     }

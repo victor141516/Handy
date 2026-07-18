@@ -14,11 +14,22 @@ use std::sync::Arc;
 use std::time::Instant;
 use tauri::{AppHandle, Manager, State};
 
+const IMPORT_AUDIO_SAMPLE_RATE_HZ: usize = 16_000;
+const IMPORT_TRANSCRIPTION_CHUNK_SECONDS: usize = 30;
+const IMPORT_TRANSCRIPTION_CHUNK_SAMPLES: usize =
+    IMPORT_AUDIO_SAMPLE_RATE_HZ * IMPORT_TRANSCRIPTION_CHUNK_SECONDS;
+
 enum ImportedTranscriptionOutcome {
     Completed(String),
+    Cancelled,
     NoSpeech,
     Failed(String),
     Panicked(String),
+}
+
+enum ChunkedTranscription {
+    Completed(String),
+    Cancelled,
 }
 
 #[derive(Serialize, Type)]
@@ -92,12 +103,19 @@ async fn save_and_transcribe_imported_audio(
     wav_path: PathBuf,
     samples: Vec<f32>,
     transcription_manager: Arc<TranscriptionManager>,
+    audio_manager: Arc<AudioRecordingManager>,
+    cancel_generation: u64,
 ) -> Result<ImportedTranscriptionOutcome, String> {
     let task_path = wav_path.clone();
     let task_result = tauri::async_runtime::spawn_blocking(move || {
         crate::audio_toolkit::save_wav_file(&task_path, &samples)
             .map_err(|e| format!("Failed to save imported audio: {}", e))?;
-        Ok::<_, String>(transcription_manager.transcribe(samples))
+        Ok::<_, String>(transcribe_imported_audio_chunks(
+            &samples,
+            &transcription_manager,
+            &audio_manager,
+            cancel_generation,
+        ))
     })
     .await;
 
@@ -115,12 +133,138 @@ async fn save_and_transcribe_imported_audio(
     };
 
     Ok(match transcription_result {
-        Ok(text) if !text.trim().is_empty() => ImportedTranscriptionOutcome::Completed(text),
-        Ok(_) => ImportedTranscriptionOutcome::NoSpeech,
+        Ok(ChunkedTranscription::Completed(text)) if !text.trim().is_empty() => {
+            ImportedTranscriptionOutcome::Completed(text)
+        }
+        Ok(ChunkedTranscription::Completed(_)) => ImportedTranscriptionOutcome::NoSpeech,
+        Ok(ChunkedTranscription::Cancelled) => ImportedTranscriptionOutcome::Cancelled,
         Err(transcription_error) => {
             ImportedTranscriptionOutcome::Failed(transcription_error.to_string())
         }
     })
+}
+
+fn transcribe_imported_audio_chunks(
+    samples: &[f32],
+    transcription_manager: &TranscriptionManager,
+    audio_manager: &AudioRecordingManager,
+    cancel_generation: u64,
+) -> Result<ChunkedTranscription, String> {
+    let total_chunks = samples.len().div_ceil(IMPORT_TRANSCRIPTION_CHUNK_SAMPLES);
+    info!(
+        "Imported audio transcription chunking: total_samples={}, chunk_samples={}, chunk_seconds={}, total_chunks={}",
+        samples.len(),
+        IMPORT_TRANSCRIPTION_CHUNK_SAMPLES,
+        IMPORT_TRANSCRIPTION_CHUNK_SECONDS,
+        total_chunks,
+    );
+
+    let transcription_result = transcribe_audio_chunks(
+        samples,
+        IMPORT_TRANSCRIPTION_CHUNK_SAMPLES,
+        || audio_manager.was_cancelled_since(cancel_generation),
+        |chunk, chunk_index, chunk_count| {
+            transcribe_imported_chunk(transcription_manager, chunk, chunk_index, chunk_count)
+        },
+    );
+
+    // Native GPU backends may retain large scratch buffers after an interrupted run.
+    if matches!(
+        &transcription_result,
+        Err(_) | Ok(ChunkedTranscription::Cancelled)
+    ) {
+        info!("Unloading transcription model after failed or cancelled audio import");
+        if let Err(unload_error) = transcription_manager.unload_model() {
+            warn!(
+                "Failed to unload transcription model after audio import stopped: {}",
+                unload_error
+            );
+        }
+    } else {
+        transcription_manager.maybe_unload_immediately("imported audio transcription");
+    }
+
+    transcription_result
+}
+
+fn transcribe_imported_chunk(
+    transcription_manager: &TranscriptionManager,
+    chunk: Vec<f32>,
+    chunk_index: usize,
+    chunk_count: usize,
+) -> Result<String, String> {
+    let chunk_started = Instant::now();
+    info!(
+        "Imported audio chunk started: chunk={}/{}, samples={}, duration_secs={:.2}, pcm_bytes={}",
+        chunk_index + 1,
+        chunk_count,
+        chunk.len(),
+        chunk.len() as f64 / IMPORT_AUDIO_SAMPLE_RATE_HZ as f64,
+        chunk.len().saturating_mul(std::mem::size_of::<f32>()),
+    );
+
+    transcription_manager.initiate_model_load();
+    let result = transcription_manager
+        .transcribe_retaining_model(chunk)
+        .map_err(|error| error.to_string());
+
+    if let Err(transcription_error) = &result {
+        error!(
+            "Imported audio chunk failed: chunk={}/{}, error={}",
+            chunk_index + 1,
+            chunk_count,
+            transcription_error,
+        );
+    }
+    info!(
+        "Imported audio chunk finished: chunk={}/{}, elapsed={:?}, success={}",
+        chunk_index + 1,
+        chunk_count,
+        chunk_started.elapsed(),
+        result.is_ok(),
+    );
+    result
+}
+
+fn transcribe_audio_chunks<Transcribe, IsCancelled>(
+    samples: &[f32],
+    chunk_samples: usize,
+    mut is_cancelled: IsCancelled,
+    mut transcribe: Transcribe,
+) -> Result<ChunkedTranscription, String>
+where
+    Transcribe: FnMut(Vec<f32>, usize, usize) -> Result<String, String>,
+    IsCancelled: FnMut() -> bool,
+{
+    if chunk_samples == 0 {
+        return Err("Audio transcription chunk size must be greater than zero".to_string());
+    }
+
+    let chunk_count = samples.len().div_ceil(chunk_samples);
+    let mut transcription_parts = Vec::with_capacity(chunk_count);
+
+    for (chunk_index, chunk) in samples.chunks(chunk_samples).enumerate() {
+        // Poll both sides of inference so cancellation never starts another chunk
+        // and discards a just-finished result when the user cancelled mid-run.
+        if is_cancelled() {
+            return Ok(ChunkedTranscription::Cancelled);
+        }
+
+        let text = transcribe(chunk.to_vec(), chunk_index, chunk_count)?;
+
+        if is_cancelled() {
+            return Ok(ChunkedTranscription::Cancelled);
+        }
+
+        let text = text.trim();
+        if !text.is_empty() {
+            transcription_parts.push(text.to_string());
+        }
+    }
+
+    Ok(ChunkedTranscription::Completed(
+        transcription_parts.join(" "),
+    ))
 }
 
 fn save_failed_import(history_manager: &HistoryManager, file_name: &str) -> Result<(), String> {
@@ -180,7 +324,7 @@ pub async fn transcribe_audio_file(
         "Audio file decoded: elapsed={:?}, samples={}, duration_secs={:.2}, pcm_bytes={}",
         started.elapsed(),
         samples.len(),
-        samples.len() as f64 / 16_000.0,
+        samples.len() as f64 / IMPORT_AUDIO_SAMPLE_RATE_HZ as f64,
         samples.len().saturating_mul(std::mem::size_of::<f32>()),
     );
 
@@ -194,6 +338,8 @@ pub async fn transcribe_audio_file(
         wav_path.clone(),
         samples,
         Arc::clone(&transcription_manager),
+        Arc::clone(&audio_manager),
+        cancel_generation,
     )
     .await?;
     info!(
@@ -209,6 +355,10 @@ pub async fn transcribe_audio_file(
 
     let transcription = match transcription_outcome {
         ImportedTranscriptionOutcome::Completed(text) => text,
+        ImportedTranscriptionOutcome::Cancelled => {
+            remove_imported_wav(&wav_path, "cancelled imported WAV");
+            return Err("Audio file transcription was cancelled".to_string());
+        }
         ImportedTranscriptionOutcome::NoSpeech => {
             warn!(
                 "Imported audio contained no recognized speech: path={}",
@@ -259,4 +409,84 @@ pub async fn transcribe_audio_file(
     );
 
     Ok(entry)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn imported_audio_is_transcribed_in_bounded_chunks_and_joined() {
+        let samples = vec![0.25; 10];
+        let mut observed_chunks = Vec::new();
+
+        let result = transcribe_audio_chunks(
+            &samples,
+            4,
+            || false,
+            |chunk, chunk_index, chunk_count| {
+                observed_chunks.push((chunk.len(), chunk_index, chunk_count));
+                Ok(format!("part {}", chunk_index + 1))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(observed_chunks, vec![(4, 0, 3), (4, 1, 3), (2, 2, 3)]);
+        assert!(matches!(
+            result,
+            ChunkedTranscription::Completed(text) if text == "part 1 part 2 part 3"
+        ));
+    }
+
+    #[test]
+    fn imported_audio_skips_blank_chunk_results() {
+        let samples = vec![0.25; 6];
+
+        let result = transcribe_audio_chunks(
+            &samples,
+            2,
+            || false,
+            |_, chunk_index, _| match chunk_index {
+                0 => Ok(" first ".to_string()),
+                1 => Ok("  ".to_string()),
+                _ => Ok("last".to_string()),
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(
+            result,
+            ChunkedTranscription::Completed(text) if text == "first last"
+        ));
+    }
+
+    #[test]
+    fn imported_audio_cancellation_stops_before_the_next_chunk() {
+        let samples = vec![0.25; 10];
+        let completed_chunks = std::cell::Cell::new(0);
+
+        let result = transcribe_audio_chunks(
+            &samples,
+            2,
+            || completed_chunks.get() == 2,
+            |_, _, _| {
+                completed_chunks.set(completed_chunks.get() + 1);
+                Ok("part".to_string())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(completed_chunks.get(), 2);
+        assert!(matches!(result, ChunkedTranscription::Cancelled));
+    }
+
+    #[test]
+    fn imported_audio_rejects_a_zero_chunk_size() {
+        let result = transcribe_audio_chunks(&[0.25], 0, || false, |_, _, _| Ok(String::new()));
+
+        assert!(matches!(
+            result,
+            Err(error) if error.contains("greater than zero")
+        ));
+    }
 }
