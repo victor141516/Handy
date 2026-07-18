@@ -1,7 +1,7 @@
 use crate::actions::ACTION_MAP;
 use crate::managers::audio::AudioRecordingManager;
 use log::{debug, error, warn};
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, Sender, SyncSender};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -33,6 +33,9 @@ enum Command {
     },
     Cancel {
         recording_was_active: bool,
+    },
+    TryBeginProcessing {
+        reply: SyncSender<bool>,
     },
     ProcessingFinished,
 }
@@ -71,8 +74,20 @@ fn classify_ptt_event(
 /// Serialises all transcription lifecycle events through a single thread
 /// to eliminate race conditions between keyboard shortcuts, signals, and
 /// the async transcribe-paste pipeline.
+#[derive(Clone)]
 pub struct TranscriptionCoordinator {
     tx: Sender<Command>,
+}
+
+/// Releases an externally claimed processing slot when its pipeline exits.
+pub struct ProcessingGuard {
+    coordinator: TranscriptionCoordinator,
+}
+
+impl Drop for ProcessingGuard {
+    fn drop(&mut self) {
+        self.coordinator.notify_processing_finished();
+    }
 }
 
 pub fn is_transcribe_binding(id: &str) -> bool {
@@ -199,6 +214,13 @@ impl TranscriptionCoordinator {
                                 stage = Stage::Idle;
                             }
                         }
+                        Command::TryBeginProcessing { reply } => {
+                            let accepted = matches!(stage, Stage::Idle);
+                            if accepted {
+                                stage = Stage::Processing;
+                            }
+                            let _ = reply.send(accepted);
+                        }
                         Command::ProcessingFinished => {
                             stage = Stage::Idle;
                         }
@@ -247,6 +269,20 @@ impl TranscriptionCoordinator {
         {
             warn!("Transcription coordinator channel closed");
         }
+    }
+
+    /// Atomically claim the global transcription pipeline for work that starts
+    /// outside the keyboard recording lifecycle, such as imported audio.
+    pub fn try_begin_processing(&self) -> Option<ProcessingGuard> {
+        let (reply, response) = mpsc::sync_channel(0);
+        self.tx.send(Command::TryBeginProcessing { reply }).ok()?;
+        response
+            .recv()
+            .ok()
+            .filter(|accepted| *accepted)
+            .map(|_| ProcessingGuard {
+                coordinator: self.clone(),
+            })
     }
 
     pub fn notify_processing_finished(&self) {

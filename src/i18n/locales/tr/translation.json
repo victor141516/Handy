@@ -15,7 +15,8 @@
     "postProcessing": "Son İşlem",
     "history": "Geçmiş",
     "debug": "Hata Ayıklama",
-    "about": "Hakkında"
+    "about": "Hakkında",
+    "audioFile": "Dosyayı yazıya dök"
   },
   "onboarding": {
     "subtitle": "Başlamak için bir transkripsiyon modeli seçin",
@@ -640,5 +641,23 @@
   },
   "whatsNew": {
     "title": "Handy v{{version}} yenilikleri"
+  },
+  "audioFileTranscription": {
+    "title": "Ses dosyasını yazıya dök",
+    "description": "Seçili modelle yazıya dökülecek bir ses dosyası seçin. Sonuç, son işlem uygulanmadan geçmişe kaydedilir.",
+    "dialogTitle": "Bir ses dosyası seçin",
+    "audioFiles": "Ses dosyaları",
+    "noFileSelected": "Ses dosyası seçilmedi",
+    "supportedFormats": "WAV, MP3, M4A, MP4, FLAC veya OGG",
+    "chooseFile": "Ses dosyası seç",
+    "chooseAnother": "Başka bir dosya seç",
+    "transcribing": "Yazıya dökülüyor…",
+    "cancel": "İptal",
+    "cancelling": "İptal ediliyor…",
+    "keepOpen": "Ses işlenirken Handy’yi açık tutun.",
+    "completed": "Yazıya dökme tamamlandı ve geçmişe kaydedildi.",
+    "result": "Transkripsiyon",
+    "openHistory": "Geçmişi aç",
+    "error": "Ses dosyası yazıya dökülemedi. Ayrıntılar için günlükleri kontrol edip tekrar deneyin."
   }
 }

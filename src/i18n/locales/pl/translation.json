@@ -15,7 +15,8 @@
     "postProcessing": "Postproces",
     "history": "Historia",
     "debug": "Debugowanie",
-    "about": "O programie"
+    "about": "O programie",
+    "audioFile": "Transkrybuj plik"
   },
   "onboarding": {
     "subtitle": "Aby rozpocząć, wybierz model transkrypcji",
@@ -640,5 +641,23 @@
   },
   "whatsNew": {
     "title": "Nowości w Handy v{{version}}"
+  },
+  "audioFileTranscription": {
+    "title": "Transkrybuj plik audio",
+    "description": "Wybierz plik audio do transkrypcji za pomocą wybranego modelu. Wynik zostanie zapisany w historii bez przetwarzania końcowego.",
+    "dialogTitle": "Wybierz plik audio",
+    "audioFiles": "Pliki audio",
+    "noFileSelected": "Nie wybrano pliku audio",
+    "supportedFormats": "WAV, MP3, M4A, MP4, FLAC lub OGG",
+    "chooseFile": "Wybierz plik audio",
+    "chooseAnother": "Wybierz inny plik",
+    "transcribing": "Transkrypcja…",
+    "cancel": "Anuluj",
+    "cancelling": "Anulowanie…",
+    "keepOpen": "Pozostaw Handy otwarty podczas przetwarzania dźwięku.",
+    "completed": "Transkrypcja zakończona i zapisana w historii.",
+    "result": "Transkrypcja",
+    "openHistory": "Otwórz historię",
+    "error": "Nie udało się wykonać transkrypcji pliku audio. Sprawdź dzienniki i spróbuj ponownie."
   }
 }

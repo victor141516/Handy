@@ -15,7 +15,8 @@
     "postProcessing": "後處理",
     "history": "歷史紀錄",
     "debug": "偵錯",
-    "about": "關於"
+    "about": "關於",
+    "audioFile": "轉錄檔案"
   },
   "onboarding": {
     "subtitle": "首先，請選擇一種模型",
@@ -640,5 +641,23 @@
   },
   "whatsNew": {
     "title": "Handy v{{version}} 新功能"
+  },
+  "audioFileTranscription": {
+    "title": "轉錄音訊檔案",
+    "description": "選擇要以目前模型轉錄的音訊檔案。結果會直接儲存至歷史紀錄，不進行後續處理。",
+    "dialogTitle": "選擇音訊檔案",
+    "audioFiles": "音訊檔案",
+    "noFileSelected": "尚未選擇音訊檔案",
+    "supportedFormats": "WAV、MP3、M4A、MP4、FLAC 或 OGG",
+    "chooseFile": "選擇音訊檔案",
+    "chooseAnother": "選擇其他檔案",
+    "transcribing": "正在轉錄…",
+    "cancel": "取消",
+    "cancelling": "正在取消…",
+    "keepOpen": "處理音訊時請保持 Handy 開啟。",
+    "completed": "轉錄完成並已儲存至歷史紀錄。",
+    "result": "轉錄內容",
+    "openHistory": "開啟歷史紀錄",
+    "error": "無法轉錄音訊檔案。請查看記錄以取得詳細資訊，然後再試一次。"
   }
 }

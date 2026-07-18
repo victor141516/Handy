@@ -15,7 +15,8 @@
     "postProcessing": "Post Process",
     "history": "History",
     "debug": "Debug",
-    "about": "About"
+    "about": "About",
+    "audioFile": "Transcribe File"
   },
   "onboarding": {
     "subtitle": "To get started, choose a transcription model",
@@ -640,5 +641,23 @@
   "overlay": {
     "transcribing": "Transcribing...",
     "processing": "Processing..."
+  },
+  "audioFileTranscription": {
+    "title": "Transcribe Audio File",
+    "description": "Choose an audio file to transcribe with your selected model. The result is saved to History without post-processing.",
+    "dialogTitle": "Choose an audio file",
+    "audioFiles": "Audio files",
+    "noFileSelected": "No audio file selected",
+    "supportedFormats": "WAV, MP3, M4A, MP4, FLAC, or OGG",
+    "chooseFile": "Choose Audio File",
+    "chooseAnother": "Choose Another File",
+    "transcribing": "Transcribing…",
+    "cancel": "Cancel",
+    "cancelling": "Cancelling…",
+    "keepOpen": "Keep Handy open while the audio is processed.",
+    "completed": "Transcription completed and saved to History.",
+    "result": "Transcription",
+    "openHistory": "Open History",
+    "error": "The audio file could not be transcribed. Check the logs for details and try again."
   }
 }

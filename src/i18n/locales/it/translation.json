@@ -15,7 +15,8 @@
     "postProcessing": "Post-Elaborazione",
     "history": "Cronologia",
     "debug": "Debug",
-    "about": "Informazioni"
+    "about": "Informazioni",
+    "audioFile": "Trascrivi file"
   },
   "onboarding": {
     "subtitle": "Per cominciare, scegli un modello di riconoscimento vocale",
@@ -640,5 +641,23 @@
   },
   "whatsNew": {
     "title": "Novità in Handy v{{version}}"
+  },
+  "audioFileTranscription": {
+    "title": "Trascrivi file audio",
+    "description": "Scegli un file audio da trascrivere con il modello selezionato. Il risultato viene salvato nella cronologia senza post-elaborazione.",
+    "dialogTitle": "Scegli un file audio",
+    "audioFiles": "File audio",
+    "noFileSelected": "Nessun file audio selezionato",
+    "supportedFormats": "WAV, MP3, M4A, MP4, FLAC oppure OGG",
+    "chooseFile": "Scegli file audio",
+    "chooseAnother": "Scegli un altro file",
+    "transcribing": "Trascrizione…",
+    "cancel": "Annulla",
+    "cancelling": "Annullamento…",
+    "keepOpen": "Mantieni Handy aperto durante l’elaborazione dell’audio.",
+    "completed": "Trascrizione completata e salvata nella cronologia.",
+    "result": "Trascrizione",
+    "openHistory": "Apri cronologia",
+    "error": "Impossibile trascrivere il file audio. Controlla i log per i dettagli e riprova."
   }
 }

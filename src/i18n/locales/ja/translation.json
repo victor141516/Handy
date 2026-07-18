@@ -15,7 +15,8 @@
     "postProcessing": "後処理",
     "history": "履歴",
     "debug": "デバッグ",
-    "about": "概要"
+    "about": "概要",
+    "audioFile": "ファイルを文字起こし"
   },
   "onboarding": {
     "subtitle": "開始するには、文字起こしのモデルを選択してください",
@@ -640,5 +641,23 @@
   },
   "whatsNew": {
     "title": "Handy v{{version}} の新機能"
+  },
+  "audioFileTranscription": {
+    "title": "音声ファイルを文字起こし",
+    "description": "選択中のモデルで文字起こしする音声ファイルを選んでください。結果は後処理なしで履歴に保存されます。",
+    "dialogTitle": "音声ファイルを選択",
+    "audioFiles": "音声ファイル",
+    "noFileSelected": "音声ファイルが選択されていません",
+    "supportedFormats": "WAV、MP3、M4A、MP4、FLAC、OGG",
+    "chooseFile": "音声ファイルを選択",
+    "chooseAnother": "別のファイルを選択",
+    "transcribing": "文字起こし中…",
+    "cancel": "キャンセル",
+    "cancelling": "キャンセル中…",
+    "keepOpen": "音声の処理中はHandyを開いたままにしてください。",
+    "completed": "文字起こしが完了し、履歴に保存されました。",
+    "result": "文字起こし",
+    "openHistory": "履歴を開く",
+    "error": "音声ファイルを文字起こしできませんでした。ログで詳細を確認して、もう一度お試しください。"
   }
 }

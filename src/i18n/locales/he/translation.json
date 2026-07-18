@@ -15,7 +15,8 @@
     "postProcessing": "עיבוד משלים",
     "history": "היסטוריה",
     "debug": "ניפוי שגיאות",
-    "about": "אודות"
+    "about": "אודות",
+    "audioFile": "תמלול קובץ"
   },
   "onboarding": {
     "subtitle": "כדי להתחיל, בחר מודל תמלול",
@@ -640,5 +641,23 @@
   },
   "whatsNew": {
     "title": "חדש ב-Handy v{{version}}"
+  },
+  "audioFileTranscription": {
+    "title": "תמלול קובץ שמע",
+    "description": "בחרו קובץ שמע לתמלול באמצעות המודל שנבחר. התוצאה נשמרת בהיסטוריה ללא עיבוד נוסף.",
+    "dialogTitle": "בחירת קובץ שמע",
+    "audioFiles": "קובצי שמע",
+    "noFileSelected": "לא נבחר קובץ שמע",
+    "supportedFormats": "WAV, MP3, M4A, MP4, FLAC או OGG",
+    "chooseFile": "בחירת קובץ שמע",
+    "chooseAnother": "בחירת קובץ אחר",
+    "transcribing": "מתמלל…",
+    "cancel": "ביטול",
+    "cancelling": "מבטל…",
+    "keepOpen": "יש להשאיר את Handy פתוח בזמן עיבוד השמע.",
+    "completed": "התמלול הושלם ונשמר בהיסטוריה.",
+    "result": "תמלול",
+    "openHistory": "פתיחת ההיסטוריה",
+    "error": "לא ניתן היה לתמלל את קובץ השמע. עיינו ביומנים לפרטים ונסו שוב."
   }
 }
