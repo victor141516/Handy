@@ -12,6 +12,7 @@ mod helpers;
 mod input;
 mod llm_client;
 mod managers;
+mod memory_diagnostics;
 mod overlay;
 pub mod portable;
 mod settings;
@@ -338,9 +339,13 @@ fn show_main_window_command(app: AppHandle) -> Result<(), String> {
 fn run_headless_transcription(app: &AppHandle, args: &CliArgs) -> i32 {
     use std::time::Instant;
 
+    let mut transcribe_backend_initialized = false;
+
     // --list-devices: print registered compute devices (with indices) and exit.
     // Useful on multi-GPU machines to discover the index for --device-index.
     if args.list_devices {
+        crate::managers::transcription::init_transcribe_backend();
+        transcribe_backend_initialized = true;
         let devices = crate::managers::transcription::describe_compute_devices();
         if devices.is_empty() {
             println!("No transcribe-cpp compute devices registered.");
@@ -432,6 +437,22 @@ fn run_headless_transcription(app: &AppHandle, args: &CliArgs) -> i32 {
         }
     };
     let audio_secs = samples.len() as f64 / 16_000.0;
+
+    // Report the memory visible before loading the transcription backend and
+    // model. This is diagnostic only: callers may intentionally run headless
+    // transcription under constrained memory and should not be blocked by an
+    // arbitrary headroom threshold.
+    if let Some(available) = crate::memory_diagnostics::available_memory_bytes() {
+        log::info!(
+            "Headless transcription memory snapshot: audio_secs={audio_secs:.1}, available_mib={:.1}",
+            available as f64 / (1024.0 * 1024.0),
+        );
+    }
+
+    if !transcribe_backend_initialized {
+        crate::managers::transcription::init_transcribe_backend();
+    }
+    crate::managers::transcription::apply_accelerator_settings(app);
 
     let tm = app.state::<Arc<TranscriptionManager>>();
 
@@ -536,6 +557,10 @@ pub fn run(cli_args: CliArgs) {
         .commands(collect_commands![
             shortcut::change_binding,
             shortcut::reset_binding,
+            shortcut::change_post_process_prompt_hotkey,
+            shortcut::reset_post_process_prompt_hotkey,
+            shortcut::suspend_post_process_prompt_hotkey,
+            shortcut::resume_post_process_prompt_hotkey,
             shortcut::change_ptt_setting,
             shortcut::change_audio_feedback_setting,
             shortcut::change_audio_feedback_volume_setting,
@@ -640,6 +665,7 @@ pub fn run(cli_args: CliArgs) {
             commands::history::get_audio_file_path,
             commands::history::delete_history_entry,
             commands::history::retry_history_entry_transcription,
+            commands::history::post_process_history_entry,
             commands::history::update_history_limit,
             commands::history::update_recording_retention_period,
             helpers::clamshell::is_laptop,
@@ -760,9 +786,7 @@ pub fn run(cli_args: CliArgs) {
             specta_builder.mount_events(app);
 
             // Headless one-shot path (`--transcribe-file` / `--list-devices` /
-            // `--list-models`): initialize only what transcription needs — the
-            // store/paths plugins, the model + transcription managers, and the
-            // transcribe-cpp backend + accelerator settings — then run on a worker
+            // `--list-models`): initialize only what each command needs, then run on a worker
             // thread and exit. Deliberately skips the window, tray, overlay, audio
             // recorder (so it never opens the mic, even with always_on_microphone),
             // signal handlers, and autostart that initialize_core_logic sets up.
@@ -771,14 +795,21 @@ pub fn run(cli_args: CliArgs) {
                 let model_manager = Arc::new(
                     ModelManager::new(&app_handle).expect("Failed to initialize model manager"),
                 );
-                let transcription_manager = Arc::new(
-                    TranscriptionManager::new(&app_handle, model_manager.clone())
-                        .expect("Failed to initialize transcription manager"),
-                );
                 app_handle.manage(model_manager);
-                app_handle.manage(transcription_manager);
-                managers::transcription::init_transcribe_backend();
-                managers::transcription::apply_accelerator_settings(&app_handle);
+
+                // Catalog-only listing must stay cheap. Initializing ggml-metal
+                // can reserve well over 1 GiB even though --list-models never
+                // loads or runs a model. Device listing needs backend discovery;
+                // actual file transcription additionally needs the manager and
+                // accelerator settings.
+                if cli_args.transcribe_file.is_some() {
+                    let model_manager = Arc::clone(&app_handle.state::<Arc<ModelManager>>());
+                    let transcription_manager = Arc::new(
+                        TranscriptionManager::new(&app_handle, model_manager)
+                            .expect("Failed to initialize transcription manager"),
+                    );
+                    app_handle.manage(transcription_manager);
+                }
 
                 let handle = app_handle.clone();
                 let args = cli_args.clone();

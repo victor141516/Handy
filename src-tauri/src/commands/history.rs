@@ -3,8 +3,10 @@ use crate::managers::{
     history::{HistoryManager, PaginatedHistory},
     transcription::TranscriptionManager,
 };
+use crate::settings::get_settings;
 use std::sync::Arc;
 use tauri::{AppHandle, State};
+use tauri_plugin_clipboard_manager::ClipboardExt;
 
 #[tauri::command]
 #[specta::specta]
@@ -93,9 +95,14 @@ pub async fn retry_history_entry_transcription(
         return Err("Recording contains no speech".to_string());
     }
 
-    let processed =
-        process_transcription_output(&app, &transcription, entry.post_process_requested, None)
-            .await;
+    let processed = process_transcription_output(
+        &app,
+        &transcription,
+        entry.post_process_requested,
+        None,
+        None,
+    )
+    .await;
     history_manager
         .update_transcription(
             id,
@@ -105,6 +112,53 @@ pub async fn retry_history_entry_transcription(
         )
         .map(|_| ())
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn post_process_history_entry(
+    app: AppHandle,
+    history_manager: State<'_, Arc<HistoryManager>>,
+    id: i64,
+    prompt_id: String,
+) -> Result<(), String> {
+    let entry = history_manager
+        .get_entry_by_id(id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("History entry {} not found", id))?;
+
+    let transcription = entry.transcription_text.trim();
+    if transcription.is_empty() {
+        return Err("History entry has no transcription text".to_string());
+    }
+
+    let settings = get_settings(&app);
+    let prompt = settings
+        .post_process_prompts
+        .iter()
+        .find(|prompt| prompt.id == prompt_id)
+        .ok_or_else(|| format!("Post-processing prompt '{}' was not found", prompt_id))?;
+
+    if prompt.prompt.trim().is_empty() {
+        return Err("Post-processing prompt is empty".to_string());
+    }
+
+    let processed = crate::actions::post_process_transcription_with_prompt(
+        &settings,
+        transcription,
+        &prompt_id,
+    )
+    .await
+    .ok_or_else(|| "Post-processing did not return any text".to_string())?;
+
+    if processed.trim().is_empty() {
+        return Err("Post-processing returned empty text".to_string());
+    }
+
+    app.clipboard()
+        .write_text(processed)
+        .map_err(|e| format!("Failed to copy post-processed text to clipboard: {}", e))
 }
 
 #[tauri::command]

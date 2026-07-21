@@ -1,7 +1,15 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { readFile } from "@tauri-apps/plugin-fs";
-import { Check, Copy, FolderOpen, RotateCcw, Star, Trash2 } from "lucide-react";
+import {
+  Check,
+  Copy,
+  FolderOpen,
+  RotateCcw,
+  Sparkles,
+  Star,
+  Trash2,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import {
@@ -9,8 +17,10 @@ import {
   events,
   type HistoryEntry,
   type HistoryUpdatePayload,
+  type LLMPrompt,
 } from "@/bindings";
 import { useOsType } from "@/hooks/useOsType";
+import { useSettings } from "@/hooks/useSettings";
 import { formatDateTime } from "@/utils/dateFormat";
 import { AudioPlayer } from "../../ui/AudioPlayer";
 import { Button } from "../../ui/Button";
@@ -62,12 +72,15 @@ const OpenRecordingsButton: React.FC<OpenRecordingsButtonProps> = ({
 export const HistorySettings: React.FC = () => {
   const { t } = useTranslation();
   const osType = useOsType();
+  const { getSetting } = useSettings();
   const [entries, setEntries] = useState<HistoryEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [hasMore, setHasMore] = useState(true);
   const sentinelRef = useRef<HTMLDivElement>(null);
   const entriesRef = useRef<HistoryEntry[]>([]);
   const loadingRef = useRef(false);
+  const postProcessPrompts = getSetting("post_process_prompts") || [];
+  const postProcessEnabled = getSetting("post_process_enabled") || false;
 
   // Keep ref in sync for use in IntersectionObserver callback
   useEffect(() => {
@@ -261,6 +274,8 @@ export const HistorySettings: React.FC = () => {
               getAudioUrl={getAudioUrl}
               deleteAudio={deleteAudioEntry}
               retryTranscription={retryHistoryEntry}
+              postProcessPrompts={postProcessPrompts}
+              postProcessEnabled={postProcessEnabled}
             />
           ))}
         </div>
@@ -299,6 +314,8 @@ interface HistoryEntryProps {
   getAudioUrl: (fileName: string) => Promise<string | null>;
   deleteAudio: (id: number) => Promise<void>;
   retryTranscription: (id: number) => Promise<void>;
+  postProcessPrompts: LLMPrompt[];
+  postProcessEnabled: boolean;
 }
 
 const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
@@ -308,17 +325,48 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
   getAudioUrl,
   deleteAudio,
   retryTranscription,
+  postProcessPrompts,
+  postProcessEnabled,
 }) => {
   const { t, i18n } = useTranslation();
   const [showCopied, setShowCopied] = useState(false);
   const [retrying, setRetrying] = useState(false);
+  const [postProcessingPromptId, setPostProcessingPromptId] = useState<
+    string | null
+  >(null);
+  const [postProcessMenuOpen, setPostProcessMenuOpen] = useState(false);
+  const postProcessMenuRef = useRef<HTMLDivElement>(null);
 
   const hasTranscription = entry.transcription_text.trim().length > 0;
+  const isPostProcessing = postProcessingPromptId !== null;
+  const hasPostProcessPrompts = postProcessPrompts.length > 0;
 
   const handleLoadAudio = useCallback(
     () => getAudioUrl(entry.file_name),
     [getAudioUrl, entry.file_name],
   );
+
+  useEffect(() => {
+    if (!postProcessEnabled) {
+      setPostProcessMenuOpen(false);
+    }
+  }, [postProcessEnabled]);
+
+  useEffect(() => {
+    if (!postProcessMenuOpen) return;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (
+        postProcessMenuRef.current &&
+        !postProcessMenuRef.current.contains(event.target as Node)
+      ) {
+        setPostProcessMenuOpen(false);
+      }
+    };
+
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => document.removeEventListener("pointerdown", handlePointerDown);
+  }, [postProcessMenuOpen]);
 
   const handleCopyText = () => {
     if (!hasTranscription) {
@@ -351,6 +399,26 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
     }
   };
 
+  const handlePostProcess = async (prompt: LLMPrompt) => {
+    try {
+      setPostProcessMenuOpen(false);
+      setPostProcessingPromptId(prompt.id);
+      const result = await commands.postProcessHistoryEntry(
+        entry.id,
+        prompt.id,
+      );
+      if (result.status !== "ok") {
+        throw new Error(String(result.error));
+      }
+      toast.success(t("settings.history.postProcessCopied"));
+    } catch (error) {
+      console.error("Failed to post-process history entry:", error);
+      toast.error(t("settings.history.postProcessError"));
+    } finally {
+      setPostProcessingPromptId(null);
+    }
+  };
+
   const formattedDate = formatDateTime(String(entry.timestamp), i18n.language);
 
   return (
@@ -360,7 +428,7 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
         <div className="flex items-center">
           <IconButton
             onClick={handleCopyText}
-            disabled={!hasTranscription || retrying}
+            disabled={!hasTranscription || retrying || isPostProcessing}
             title={t("settings.history.copyToClipboard")}
           >
             {showCopied ? (
@@ -371,7 +439,7 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
           </IconButton>
           <IconButton
             onClick={onToggleSaved}
-            disabled={retrying}
+            disabled={retrying || isPostProcessing}
             active={entry.saved}
             title={
               entry.saved
@@ -387,7 +455,7 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
           </IconButton>
           <IconButton
             onClick={handleRetranscribe}
-            disabled={retrying}
+            disabled={retrying || isPostProcessing}
             title={t("settings.history.retranscribe")}
           >
             <RotateCcw
@@ -400,9 +468,70 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
               }
             />
           </IconButton>
+          {postProcessEnabled && (
+            <div className="relative" ref={postProcessMenuRef}>
+              <IconButton
+                onClick={() => setPostProcessMenuOpen((open) => !open)}
+                disabled={
+                  !hasTranscription ||
+                  retrying ||
+                  isPostProcessing ||
+                  !hasPostProcessPrompts
+                }
+                active={postProcessMenuOpen || isPostProcessing}
+                title={
+                  hasPostProcessPrompts
+                    ? t("settings.history.postProcess")
+                    : t("settings.history.postProcessNoPrompts")
+                }
+              >
+                <span
+                  className="relative flex h-4 w-4 items-center justify-center"
+                  aria-hidden="true"
+                >
+                  {isPostProcessing && (
+                    <style>{`
+                      @keyframes history-post-process-pulse {
+                        0%, 100% { opacity: 0.65; transform: scale(0.92); filter: drop-shadow(0 0 0 currentColor); }
+                        50% { opacity: 1; transform: scale(1.08); filter: drop-shadow(0 0 5px currentColor); }
+                      }
+                    `}</style>
+                  )}
+                  <Sparkles
+                    width={16}
+                    height={16}
+                    className="shrink-0"
+                    style={
+                      isPostProcessing
+                        ? {
+                            animation:
+                              "history-post-process-pulse 1.1s ease-in-out infinite",
+                          }
+                        : undefined
+                    }
+                  />
+                </span>
+              </IconButton>
+              {postProcessMenuOpen && (
+                <div className="absolute right-0 top-full z-20 mt-1 min-w-44 overflow-hidden rounded-md border border-mid-gray/20 bg-background shadow-lg">
+                  {postProcessPrompts.map((prompt) => (
+                    <button
+                      key={prompt.id}
+                      type="button"
+                      className="block w-full px-3 py-2 text-left text-xs text-text hover:bg-mid-gray/10 focus:bg-mid-gray/20 focus:outline-none"
+                      onClick={() => handlePostProcess(prompt)}
+                      disabled={isPostProcessing}
+                    >
+                      <span className="block truncate">{prompt.name}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           <IconButton
             onClick={handleDeleteEntry}
-            disabled={retrying}
+            disabled={retrying || isPostProcessing}
             title={t("settings.history.delete")}
           >
             <Trash2 width={16} height={16} />
@@ -434,9 +563,11 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
         )}
         {retrying
           ? t("settings.history.transcribing")
-          : hasTranscription
-            ? entry.transcription_text
-            : t("settings.history.transcriptionFailed")}
+          : isPostProcessing
+            ? t("settings.history.postProcessing")
+            : hasTranscription
+              ? entry.transcription_text
+              : t("settings.history.transcriptionFailed")}
       </p>
 
       <AudioPlayer onLoadRequest={handleLoadAudio} className="w-full" />

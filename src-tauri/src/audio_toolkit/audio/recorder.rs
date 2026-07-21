@@ -18,6 +18,7 @@ use crate::audio_toolkit::{
     vad::{self, VadFrame},
     VoiceActivityDetector,
 };
+use crate::memory_diagnostics::log_memory_snapshot;
 
 enum Cmd {
     /// Begin capturing. Carries the send timestamp so the consumer can log how
@@ -533,6 +534,8 @@ fn run_consumer(
     let mut processed_samples = Vec::<f32>::new();
     let mut recording = false;
     let mut vad_policy = VadPolicy::Offline;
+    let mut recording_started: Option<Instant> = None;
+    let mut next_recording_progress_log = Duration::from_secs(60);
 
     // ---------- latency instrumentation ---------------------------------- //
     // First-chunk arrival exposes the play()->samples-flowing gap; the
@@ -616,6 +619,8 @@ fn run_consumer(
                     vad_policy = policy;
                     processed_samples.clear();
                     recording = true;
+                    recording_started = Some(Instant::now());
+                    next_recording_progress_log = Duration::from_secs(60);
                     visualizer.reset();
                     frame_resampler.reset();
                     // Reconfigure the single VAD engine for this session's policy
@@ -628,6 +633,7 @@ fn run_consumer(
                             det.reset();
                         }
                     }
+                    log_memory_snapshot("audio recording started");
                 }
                 Cmd::Stop(reply_tx) => {
                     recording = false;
@@ -685,7 +691,22 @@ fn run_consumer(
                         )
                     });
 
+                    log::info!(
+                        "Audio recording buffer finalized: elapsed={:.1}s, samples={}, duration={:.1}s, len_bytes={}, capacity_bytes={}",
+                        recording_started.map_or(0.0, |started| started.elapsed().as_secs_f64()),
+                        processed_samples.len(),
+                        processed_samples.len() as f64
+                            / constants::WHISPER_SAMPLE_RATE as f64,
+                        processed_samples
+                            .len()
+                            .saturating_mul(std::mem::size_of::<f32>()),
+                        processed_samples
+                            .capacity()
+                            .saturating_mul(std::mem::size_of::<f32>()),
+                    );
+                    log_memory_snapshot("audio recording buffer finalized");
                     let _ = reply_tx.send(std::mem::take(&mut processed_samples));
+                    recording_started = None;
 
                     // Resume the audio callback so the consumer loop can continue
                     // receiving chunks (important for always-on microphone mode).
@@ -732,6 +753,28 @@ fn run_consumer(
                 &mut processed_samples,
             )
         });
+
+        if recording {
+            if let Some(started) = recording_started {
+                if started.elapsed() >= next_recording_progress_log {
+                    log::info!(
+                        "Audio recording progress: elapsed={:.1}s, retained_samples={}, retained_audio={:.1}s, len_bytes={}, capacity_bytes={}",
+                        started.elapsed().as_secs_f64(),
+                        processed_samples.len(),
+                        processed_samples.len() as f64
+                            / constants::WHISPER_SAMPLE_RATE as f64,
+                        processed_samples
+                            .len()
+                            .saturating_mul(std::mem::size_of::<f32>()),
+                        processed_samples
+                            .capacity()
+                            .saturating_mul(std::mem::size_of::<f32>()),
+                    );
+                    log_memory_snapshot("audio recording progress");
+                    next_recording_progress_log += Duration::from_secs(60);
+                }
+            }
+        }
 
         if recording {
             if let Some(started) = awaiting_first_captured_chunk.take() {

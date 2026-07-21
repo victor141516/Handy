@@ -7,12 +7,23 @@ pub struct AccessibilityContextEvent {
     pub text: String,
 }
 
+#[cfg(test)]
 pub(crate) fn deduplicate_accessibility_events(
     events: &[AccessibilityContextEvent],
 ) -> Vec<AccessibilityContextEvent> {
     let mut deduplicated = Vec::with_capacity(events.len());
     for event in events {
         push_deduplicated_event(&mut deduplicated, event.clone());
+    }
+    deduplicated
+}
+
+pub(crate) fn deduplicate_owned_accessibility_events(
+    events: Vec<AccessibilityContextEvent>,
+) -> Vec<AccessibilityContextEvent> {
+    let mut deduplicated = Vec::with_capacity(events.len());
+    for event in events {
+        push_deduplicated_event(&mut deduplicated, event);
     }
     deduplicated
 }
@@ -79,6 +90,7 @@ fn normalized_accessibility_text(value: &str) -> String {
 #[cfg(target_os = "macos")]
 mod platform {
     use super::{push_deduplicated_event, AccessibilityContextEvent};
+    use crate::memory_diagnostics::log_memory_snapshot;
     use core_foundation::array::CFArray;
     use core_foundation::attributed_string::CFAttributedString;
     use core_foundation::base::{CFType, CFTypeRef, TCFType};
@@ -88,17 +100,18 @@ mod platform {
     use core_foundation::string::{CFString, CFStringRef};
     use core_foundation_sys::array::{CFArrayGetTypeID, CFArrayRef};
     use core_foundation_sys::attributed_string::CFAttributedStringGetString;
-    use core_foundation_sys::base::{Boolean, CFGetTypeID, CFHash, CFRelease, CFTypeID};
+    use core_foundation_sys::base::{Boolean, CFGetTypeID, CFHash, CFRange, CFRelease, CFTypeID};
     use core_foundation_sys::dictionary::{
         CFDictionaryGetTypeID, CFDictionaryGetValueIfPresent, CFDictionaryRef,
     };
     use core_foundation_sys::number::{CFBooleanGetTypeID, CFBooleanGetValue};
+    use core_foundation_sys::string::{kCFStringEncodingUTF8, CFStringGetBytes, CFStringGetLength};
     use core_graphics::window::{
         copy_window_info, kCGNullWindowID, kCGWindowAlpha, kCGWindowLayer,
         kCGWindowListExcludeDesktopElements, kCGWindowListOptionOnScreenOnly, kCGWindowName,
         kCGWindowOwnerName, kCGWindowOwnerPID,
     };
-    use log::{debug, warn};
+    use log::{info, warn};
     use once_cell::sync::Lazy;
     use std::collections::HashSet;
     use std::ffi::c_void;
@@ -115,6 +128,12 @@ mod platform {
     const MAX_DESCENDANT_TEXT_DEPTH: usize = 2;
     const MAX_NODES: usize = 2_500;
     const MAX_DESCENDANT_NODES: usize = 80;
+    const MAX_RECORDED_EVENTS: usize = 240;
+    const MAX_RECORDED_CONTEXT_BYTES: usize = 512 * 1024;
+    const MAX_CONTEXT_FIELD_CHARS: usize = 256;
+    const MAX_CONTEXT_TEXT_CHARS: usize = 8_000;
+    const MAX_CONTEXT_ARRAY_ITEMS: usize = 64;
+    const RECORDER_PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(60);
 
     #[repr(C)]
     struct __AXUIElement(c_void);
@@ -219,11 +238,21 @@ mod platform {
         let started = Instant::now();
         let mut events = Vec::new();
         let mut last_snapshot: Option<ReadingSnapshot> = None;
+        let mut poll_count = 0_u64;
+        let mut changed_snapshot_count = 0_u64;
+        let mut dropped_event_count = 0_u64;
+        let mut slowest_poll = Duration::ZERO;
+        let mut next_progress_log = RECORDER_PROGRESS_LOG_INTERVAL;
+
+        log_memory_snapshot("accessibility recorder started");
 
         while !stop.load(Ordering::Acquire) {
+            let poll_started = Instant::now();
+            poll_count += 1;
             if let Some(snapshot) = current_reading() {
                 if last_snapshot.as_ref() != Some(&snapshot) {
-                    push_deduplicated_event(
+                    changed_snapshot_count += 1;
+                    dropped_event_count += push_recorded_event(
                         &mut events,
                         AccessibilityContextEvent {
                             elapsed_ms: duration_ms(started.elapsed()),
@@ -232,21 +261,73 @@ mod platform {
                             element: snapshot.element.clone(),
                             text: snapshot.text.clone(),
                         },
-                    );
+                    ) as u64;
                     last_snapshot = Some(snapshot);
                 }
             } else {
                 last_snapshot = None;
             }
 
+            slowest_poll = slowest_poll.max(poll_started.elapsed());
+            if started.elapsed() >= next_progress_log {
+                info!(
+                    "Accessibility context recorder progress: elapsed={:.1}s, polls={}, changed_snapshots={}, retained_events={}, retained_bytes={}, dropped_events={}, slowest_poll_ms={}",
+                    started.elapsed().as_secs_f64(),
+                    poll_count,
+                    changed_snapshot_count,
+                    events.len(),
+                    recorded_events_bytes(&events),
+                    dropped_event_count,
+                    slowest_poll.as_millis(),
+                );
+                log_memory_snapshot("accessibility recorder progress");
+                next_progress_log += RECORDER_PROGRESS_LOG_INTERVAL;
+            }
+
             thread::sleep(POLL_INTERVAL);
         }
 
-        debug!(
-            "Accessibility context recorder captured {} event(s)",
-            events.len()
+        info!(
+            "Accessibility context recorder stopped: elapsed={:.1}s, polls={}, changed_snapshots={}, retained_events={}, retained_bytes={}, dropped_events={}, slowest_poll_ms={}",
+            started.elapsed().as_secs_f64(),
+            poll_count,
+            changed_snapshot_count,
+            events.len(),
+            recorded_events_bytes(&events),
+            dropped_event_count,
+            slowest_poll.as_millis(),
         );
+        log_memory_snapshot("accessibility recorder stopped");
         events
+    }
+
+    fn push_recorded_event(
+        events: &mut Vec<AccessibilityContextEvent>,
+        event: AccessibilityContextEvent,
+    ) -> usize {
+        let original_len = events.len();
+        push_deduplicated_event(events, event);
+        let mut dropped = original_len.saturating_add(1).saturating_sub(events.len());
+
+        while events.len() > MAX_RECORDED_EVENTS
+            || recorded_events_bytes(events) > MAX_RECORDED_CONTEXT_BYTES
+        {
+            events.remove(0);
+            dropped += 1;
+        }
+        dropped
+    }
+
+    fn recorded_events_bytes(events: &[AccessibilityContextEvent]) -> usize {
+        events.iter().map(accessibility_event_bytes).sum()
+    }
+
+    fn accessibility_event_bytes(event: &AccessibilityContextEvent) -> usize {
+        event.app_name.len()
+            + event.window_title.len()
+            + event.element.len()
+            + event.text.len()
+            + std::mem::size_of::<AccessibilityContextEvent>()
     }
 
     fn duration_ms(duration: Duration) -> u64 {
@@ -360,10 +441,10 @@ mod platform {
         text: String,
     ) -> ReadingSnapshot {
         ReadingSnapshot {
-            app_name: context.app_name.clone(),
-            window_title: window_title.to_string(),
-            element: element.to_string(),
-            text,
+            app_name: truncate_text(&context.app_name, MAX_CONTEXT_FIELD_CHARS),
+            window_title: truncate_text(window_title, MAX_CONTEXT_FIELD_CHARS),
+            element: truncate_text(element, MAX_CONTEXT_FIELD_CHARS),
+            text: truncate_text(&text, MAX_CONTEXT_TEXT_CHARS),
         }
     }
 
@@ -494,11 +575,7 @@ mod platform {
             )
         };
 
-        if error == AX_SUCCESS && !value.is_null() {
-            Some(unsafe { CFType::wrap_under_create_rule(value) })
-        } else {
-            None
-        }
+        value_from_ax_copy_result(error, value)
     }
 
     fn copy_parameterized_attribute(
@@ -517,9 +594,14 @@ mod platform {
             )
         };
 
+        value_from_ax_copy_result(error, value)
+    }
+
+    fn value_from_ax_copy_result(error: i32, value: CFTypeRef) -> Option<CFType> {
         if error == AX_SUCCESS && !value.is_null() {
             Some(unsafe { CFType::wrap_under_create_rule(value) })
         } else {
+            release_created_value(value);
             None
         }
     }
@@ -585,6 +667,9 @@ mod platform {
                 .and_then(accessibility_text)
             {
                 push_unique_text(&mut seen, &mut pieces, text);
+                if collected_text_chars(&pieces) >= MAX_CONTEXT_TEXT_CHARS {
+                    break;
+                }
             }
         }
 
@@ -618,6 +703,10 @@ mod platform {
         }
 
         for child in child_elements(element) {
+            if collected_text_chars(pieces) >= MAX_CONTEXT_TEXT_CHARS {
+                return;
+            }
+
             if !visited.insert(element_hash(&child)) {
                 continue;
             }
@@ -628,6 +717,9 @@ mod platform {
                     .and_then(accessibility_text)
                 {
                     push_unique_text(seen, pieces, text);
+                    if collected_text_chars(pieces) >= MAX_CONTEXT_TEXT_CHARS {
+                        return;
+                    }
                 }
             }
 
@@ -834,8 +926,10 @@ mod platform {
 
         let type_id = CFGetTypeID(value);
         if type_id == CFString::type_id() {
-            let string = CFString::wrap_under_get_rule(value as _);
-            return Some(string.to_string());
+            return non_blank(bounded_cf_string(
+                value as CFStringRef,
+                MAX_CONTEXT_TEXT_CHARS,
+            ));
         }
 
         if type_id == CFNumber::type_id() {
@@ -849,8 +943,7 @@ mod platform {
         if type_id == CFAttributedString::type_id() {
             let string_ref = CFAttributedStringGetString(value as _);
             if !string_ref.is_null() {
-                let string = CFString::wrap_under_get_rule(string_ref);
-                return Some(string.to_string());
+                return non_blank(bounded_cf_string(string_ref, MAX_CONTEXT_TEXT_CHARS));
             }
         }
 
@@ -858,20 +951,36 @@ mod platform {
             let array = CFArray::<CFType>::wrap_under_get_rule(value as CFArrayRef);
             let pieces = array
                 .iter()
+                .take(MAX_CONTEXT_ARRAY_ITEMS)
                 .filter_map(|item| text_from_type_ref(item.as_CFTypeRef()))
                 .filter_map(non_blank)
                 .collect::<Vec<_>>();
-            return non_blank(pieces.join(" "));
+            return non_blank(truncate_text(&pieces.join(" "), MAX_CONTEXT_TEXT_CHARS));
         }
 
         None
     }
 
     fn push_unique_text(seen: &mut HashSet<String>, pieces: &mut Vec<String>, text: String) {
+        let used_chars = collected_text_chars(pieces);
+        let separator_chars = usize::from(!pieces.is_empty());
+        if used_chars.saturating_add(separator_chars) >= MAX_CONTEXT_TEXT_CHARS {
+            return;
+        }
+
+        let text = truncate_text(&text, MAX_CONTEXT_TEXT_CHARS - used_chars - separator_chars);
         let normalized = normalize(&text);
         if !normalized.is_empty() && seen.insert(normalized) {
             pieces.push(text);
         }
+    }
+
+    fn collected_text_chars(pieces: &[String]) -> usize {
+        pieces
+            .iter()
+            .map(|piece| piece.chars().count())
+            .sum::<usize>()
+            .saturating_add(pieces.len().saturating_sub(1))
     }
 
     fn element_hash(element: &CFType) -> usize {
@@ -884,6 +993,62 @@ mod platform {
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ")
+    }
+
+    fn truncate_text(value: &str, max_chars: usize) -> String {
+        if value.chars().count() <= max_chars {
+            return value.to_string();
+        }
+
+        let mut truncated = value
+            .chars()
+            .take(max_chars.saturating_sub(1))
+            .collect::<String>();
+        truncated.push('…');
+        truncated
+    }
+
+    unsafe fn bounded_cf_string(value: CFStringRef, max_utf16_units: usize) -> String {
+        let total_units = CFStringGetLength(value).max(0);
+        let requested_units = total_units.min(max_utf16_units as isize);
+        if requested_units == 0 {
+            return String::new();
+        }
+
+        let range = CFRange::init(0, requested_units);
+        let mut bytes_required = 0;
+        let converted_units = CFStringGetBytes(
+            value,
+            range,
+            kCFStringEncodingUTF8,
+            0,
+            false as Boolean,
+            ptr::null_mut(),
+            0,
+            &mut bytes_required,
+        );
+        if converted_units <= 0 || bytes_required <= 0 {
+            return String::new();
+        }
+
+        let mut buffer = vec![0_u8; bytes_required as usize];
+        let mut bytes_used = 0;
+        let converted_units = CFStringGetBytes(
+            value,
+            range,
+            kCFStringEncodingUTF8,
+            0,
+            false as Boolean,
+            buffer.as_mut_ptr(),
+            buffer.len() as isize,
+            &mut bytes_used,
+        );
+        buffer.truncate(bytes_used.max(0) as usize);
+        let mut result = String::from_utf8_lossy(&buffer).into_owned();
+        if converted_units < total_units {
+            result.push('…');
+        }
+        result
     }
 
     fn non_blank(value: String) -> Option<String> {
@@ -902,7 +1067,6 @@ mod platform {
         }
     }
 
-    #[allow(dead_code)]
     fn release_created_value(value: CFTypeRef) {
         if !value.is_null() {
             unsafe { CFRelease(value) };
@@ -911,7 +1075,12 @@ mod platform {
 
     #[cfg(test)]
     mod tests {
-        use super::is_selection_only_application;
+        use super::{
+            bounded_cf_string, is_selection_only_application, push_recorded_event,
+            push_unique_text, recorded_events_bytes, truncate_text, AccessibilityContextEvent,
+            CFString, HashSet, TCFType, MAX_CONTEXT_TEXT_CHARS, MAX_RECORDED_CONTEXT_BYTES,
+            MAX_RECORDED_EVENTS,
+        };
 
         #[test]
         fn code_editors_are_selection_only_applications() {
@@ -925,6 +1094,81 @@ mod platform {
         fn regular_applications_are_not_selection_only_applications() {
             assert!(!is_selection_only_application("Safari"));
             assert!(!is_selection_only_application("Notes"));
+        }
+
+        #[test]
+        fn recorded_events_are_bounded() {
+            let mut events = Vec::new();
+            for index in 0..(MAX_RECORDED_EVENTS + 5) {
+                push_recorded_event(
+                    &mut events,
+                    AccessibilityContextEvent {
+                        elapsed_ms: index as u64,
+                        app_name: "Notes".to_string(),
+                        window_title: "Draft".to_string(),
+                        element: "Selected text".to_string(),
+                        text: format!("selected text {index}"),
+                    },
+                );
+            }
+
+            assert_eq!(events.len(), MAX_RECORDED_EVENTS);
+            assert_eq!(events[0].elapsed_ms, 5);
+        }
+
+        #[test]
+        fn recorded_events_are_bounded_by_retained_bytes() {
+            let mut events = Vec::new();
+            for index in 0..100 {
+                push_recorded_event(
+                    &mut events,
+                    AccessibilityContextEvent {
+                        elapsed_ms: index,
+                        app_name: "Notes".to_string(),
+                        window_title: format!("Draft {index}"),
+                        element: "Selected text".to_string(),
+                        text: "x".repeat(8_000),
+                    },
+                );
+            }
+
+            assert!(recorded_events_bytes(&events) <= MAX_RECORDED_CONTEXT_BYTES);
+            assert!(events.len() < 100);
+        }
+
+        #[test]
+        fn truncated_text_preserves_unicode_boundary() {
+            assert_eq!(truncate_text("abcdef", 4), "abc…");
+            assert_eq!(truncate_text("áéíóú", 4), "áéí…");
+        }
+
+        #[test]
+        fn core_foundation_strings_are_copied_with_a_hard_limit() {
+            let value = CFString::new(&"x".repeat(100_000));
+            let bounded = unsafe { bounded_cf_string(value.as_concrete_TypeRef(), 32) };
+
+            assert_eq!(bounded.chars().count(), 33);
+            assert!(bounded.ends_with('…'));
+        }
+
+        #[test]
+        fn collected_text_parts_have_an_aggregate_limit() {
+            let mut seen = HashSet::new();
+            let mut pieces = Vec::new();
+            push_unique_text(
+                &mut seen,
+                &mut pieces,
+                "a".repeat(MAX_CONTEXT_TEXT_CHARS - 10),
+            );
+            push_unique_text(&mut seen, &mut pieces, "b".repeat(1_000));
+            push_unique_text(&mut seen, &mut pieces, "ignored".to_string());
+
+            let chars = pieces
+                .iter()
+                .map(|piece| piece.chars().count())
+                .sum::<usize>()
+                + pieces.len().saturating_sub(1);
+            assert!(chars <= MAX_CONTEXT_TEXT_CHARS);
         }
     }
 }
@@ -944,7 +1188,10 @@ pub use platform::{start_recording_context, stop_recording_context};
 
 #[cfg(test)]
 mod tests {
-    use super::{deduplicate_accessibility_events, AccessibilityContextEvent};
+    use super::{
+        deduplicate_accessibility_events, deduplicate_owned_accessibility_events,
+        AccessibilityContextEvent,
+    };
 
     fn event(
         elapsed_ms: u64,
@@ -1015,5 +1262,16 @@ mod tests {
         let deduplicated = deduplicate_accessibility_events(&events);
 
         assert_eq!(deduplicated, events);
+    }
+
+    #[test]
+    fn owned_deduplication_moves_payload_strings_without_copying_them() {
+        let events = vec![event(100, "Notes", "Draft", "a fairly large selected text")];
+        let original_text_allocation = events[0].text.as_ptr();
+
+        let deduplicated = deduplicate_owned_accessibility_events(events);
+
+        assert_eq!(deduplicated.len(), 1);
+        assert_eq!(deduplicated[0].text.as_ptr(), original_text_allocation);
     }
 }
