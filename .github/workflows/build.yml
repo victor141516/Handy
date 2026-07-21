@@ -16,6 +16,10 @@ on:
       release-id:
         required: false
         type: string
+      release_tag:
+        required: false
+        type: string
+        default: ""
       asset-prefix:
         required: false
         type: string
@@ -539,11 +543,11 @@ jobs:
           # X-AppImage-Version for desktop integration tools such as Gear Lever.
           LINUXDEPLOY_OUTPUT_VERSION: ${{ contains(inputs.platform, 'ubuntu') && steps.get-version.outputs.version || '' }}
         with:
-          tagName: ${{ inputs.release-id && format('v{0}', steps.get-version.outputs.version) || '' }}
-          releaseName: ${{ inputs.release-id && format('v{0}', steps.get-version.outputs.version) || '' }}
+          tagName: ${{ inputs.release-id && (inputs.release_tag || format('v{0}', steps.get-version.outputs.version)) || '' }}
+          releaseName: ${{ inputs.release-id && (inputs.release_tag || format('v{0}', steps.get-version.outputs.version)) || '' }}
           releaseId: ${{ inputs.release-id }}
           assetNamePattern: ${{ steps.patch-release-name.outputs.platform }}
-          args: ${{ inputs.build-args }}
+          args: ${{ format('{0}{1}', inputs.build-args, inputs.sign-binaries && '' || ' --config src-tauri/tauri.unsigned.conf.json') }}
 
       # tauri-action uploads release assets before returning. All AppImage
       # filtering therefore happens inside linuxdeploy above; this verifies the
