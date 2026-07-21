@@ -798,8 +798,8 @@ PostProcessingSettingsContext.displayName = "PostProcessingSettingsContext";
 
 export const PostProcessingSettings: React.FC = () => {
   const { t } = useTranslation();
-  const isMacOS = osType() === "macos";
-  const contextItems = isMacOS
+  const supportsAccessibilityContext = ["macos", "windows"].includes(osType());
+  const contextItems = supportsAccessibilityContext
     ? [<PostProcessingSettingsContext key="accessibility-context" />]
     : [];
 
