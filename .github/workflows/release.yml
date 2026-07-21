@@ -1,6 +1,13 @@
 name: "Release"
 
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+    inputs:
+      tag_suffix:
+        description: "Suffix appended to the application version for this fork release"
+        required: true
+        type: string
+        default: "victor141516"
 
 jobs:
   create-release:
@@ -9,6 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       release-id: ${{ steps.create-release.outputs.result }}
+      release_tag: ${{ steps.release-metadata.outputs.release_tag }}
       version: ${{ steps.get-version.outputs.version }}
     steps:
       - name: Checkout repository
@@ -22,16 +30,33 @@ jobs:
           echo "Application version from tauri.conf.json: $VERSION"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
+      - name: Determine release tag
+        id: release-metadata
+        shell: bash
+        env:
+          VERSION: ${{ steps.get-version.outputs.version }}
+          TAG_SUFFIX: ${{ inputs.tag_suffix }}
+        run: |
+          if [[ ! "$TAG_SUFFIX" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+            echo "Invalid release tag suffix: $TAG_SUFFIX" >&2
+            exit 1
+          fi
+          RELEASE_TAG="v${VERSION}-${TAG_SUFFIX}"
+          echo "Release tag: $RELEASE_TAG"
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
       - name: Create Draft Release
         id: create-release
         uses: actions/github-script@v9
+        env:
+          RELEASE_TAG: ${{ steps.release-metadata.outputs.release_tag }}
         with:
           script: |
             const { data } = await github.rest.repos.createRelease({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              tag_name: `v${{ steps.get-version.outputs.version }}`,
-              name: `v${{ steps.get-version.outputs.version }}`,
+              tag_name: process.env.RELEASE_TAG,
+              name: process.env.RELEASE_TAG,
               draft: true,
               prerelease: false,
               generate_release_notes: true
@@ -73,11 +98,31 @@ jobs:
       platform: ${{ matrix.platform }}
       target: ${{ matrix.target }}
       build-args: ${{ matrix.args }}
-      sign-binaries: true
+      sign-binaries: false
       asset-prefix: "handy"
       upload-artifacts: false
       release-id: ${{ needs.create-release.outputs.release-id }}
+      release_tag: ${{ needs.create-release.outputs.release_tag }}
       # Releases always build from scratch — never restore the Rust cache, so a
       # stale cached native lib can never be linked into a shipped artifact.
       no-cache: true
     secrets: inherit
+
+  publish-release:
+    permissions:
+      contents: write
+    needs: [create-release, publish-tauri]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish completed release
+        uses: actions/github-script@v9
+        env:
+          RELEASE_ID: ${{ needs.create-release.outputs.release-id }}
+        with:
+          script: |
+            await github.rest.repos.updateRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: Number(process.env.RELEASE_ID),
+              draft: false
+            })
