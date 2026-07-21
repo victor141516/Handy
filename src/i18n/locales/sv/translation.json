@@ -468,7 +468,13 @@
         "createPrompt": "Skapa prompt",
         "cancel": "Avbryt",
         "selectToEdit": "Välj en prompt ovan för att visa och redigera dess detaljer.",
-        "createFirst": "Klicka på 'Skapa ny prompt' ovan för att skapa din första prompt för efterbearbetning."
+        "createFirst": "Klicka på 'Skapa ny prompt' ovan för att skapa din första prompt för efterbearbetning.",
+        "hotkey": {
+          "label": "Hotkey",
+          "description": "Optional shortcut that records and post-processes with this prompt.",
+          "none": "None",
+          "reset": "Clear prompt hotkey"
+        }
       }
     },
     "history": {
@@ -485,7 +491,12 @@
       "retranscribe": "Transkribera igen",
       "retranscribeError": "Misslyckades med att transkribera igen. Försök igen.",
       "transcribing": "Transkriberar...",
-      "transcriptionFailed": "Transkribering misslyckades. Du kan transkribera igen med hjälp av ikonen för nytt försök."
+      "transcriptionFailed": "Transkribering misslyckades. Du kan transkribera igen med hjälp av ikonen för nytt försök.",
+      "postProcess": "Post process",
+      "postProcessing": "Post-processing...",
+      "postProcessCopied": "Post-processed text copied to clipboard.",
+      "postProcessError": "Failed to post-process transcription. Please try again.",
+      "postProcessNoPrompts": "Create a post-processing prompt first"
     },
     "debug": {
       "title": "Felsökning",

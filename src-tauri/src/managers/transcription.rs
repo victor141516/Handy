@@ -5,6 +5,7 @@ use crate::audio_toolkit::{
 use crate::chinese_script::{convert_chinese_script, ChineseVariety};
 use crate::managers::audio::AudioRecordingManager;
 use crate::managers::model::{EngineType, ModelManager};
+use crate::memory_diagnostics::log_memory_snapshot;
 use crate::settings::{
     get_settings, AppSettings, ChineseScript, ModelUnloadTimeout, OrtAcceleratorSetting,
     TranscribeAcceleratorSetting,
@@ -39,7 +40,9 @@ use transcribe_rs::{
 };
 
 const STREAM_PERF_LOG_INTERVAL: Duration = Duration::from_secs(5);
+const STREAM_MEMORY_LOG_INTERVAL: Duration = Duration::from_secs(60);
 const STREAM_FINALIZE_REPLY_TIMEOUT: Duration = Duration::from_secs(30);
+const STREAM_QUEUE_CAPACITY_FRAMES: usize = 512;
 const LONG_AUDIO_BATCH_THRESHOLD_SECONDS: usize = 120;
 const LONG_AUDIO_CHUNK_SECONDS: usize = 30;
 const TRANSCRIPTION_SAMPLE_RATE_HZ: usize = 16_000;
@@ -161,7 +164,7 @@ enum StreamCmd {
 }
 
 struct FinalizedStreamText {
-    text: String,
+    output: TranscriptionOutput,
     output_language: OutputLanguageEvidence,
     /// The streaming model's supported languages, for text-based detection.
     supported_languages: Vec<String>,
@@ -175,10 +178,13 @@ struct FinalizedStreamText {
 pub struct StreamRouter {
     /// Command channel to the active streaming worker, present from
     /// `start_stream` until `finalize_stream`/`cancel_stream`.
-    tx: Mutex<Option<mpsc::Sender<StreamCmd>>>,
+    tx: Mutex<Option<mpsc::SyncSender<StreamCmd>>>,
     /// True while a stream is pending or active (channel is open). The audio
     /// callback checks this first to avoid the mutex lock when no stream runs.
     open: Arc<AtomicBool>,
+    queued_frames: AtomicU64,
+    queue_high_water: AtomicU64,
+    dropped_frames: AtomicU64,
 }
 
 impl StreamRouter {
@@ -186,6 +192,9 @@ impl StreamRouter {
         Self {
             tx: Mutex::new(None),
             open: Arc::new(AtomicBool::new(false)),
+            queued_frames: AtomicU64::new(0),
+            queue_high_water: AtomicU64::new(0),
+            dropped_frames: AtomicU64::new(0),
         }
     }
 
@@ -193,15 +202,18 @@ impl StreamRouter {
     /// receiver the worker should drain. Caller must ensure no prior channel is
     /// still open.
     fn open(&self) -> mpsc::Receiver<StreamCmd> {
-        let (tx, rx) = mpsc::channel::<StreamCmd>();
+        let (tx, rx) = mpsc::sync_channel::<StreamCmd>(STREAM_QUEUE_CAPACITY_FRAMES);
         *self.tx.lock().unwrap() = Some(tx);
+        self.queued_frames.store(0, Ordering::Release);
+        self.queue_high_water.store(0, Ordering::Release);
+        self.dropped_frames.store(0, Ordering::Release);
         self.open.store(true, Ordering::Relaxed);
         rx
     }
 
     /// Take the sender out (closing the channel to new feeds). Returns the
     /// sender so the caller can send the final `Finalize`/`Cancel` command.
-    fn take(&self) -> Option<mpsc::Sender<StreamCmd>> {
+    fn take(&self) -> Option<mpsc::SyncSender<StreamCmd>> {
         self.open.store(false, Ordering::Relaxed);
         self.tx.lock().unwrap().take()
     }
@@ -220,8 +232,50 @@ impl StreamRouter {
             return;
         }
         if let Some(tx) = self.tx.lock().unwrap().as_ref() {
-            let _ = tx.send(StreamCmd::Feed(frame.to_vec()));
+            let queued = self.queued_frames.fetch_add(1, Ordering::AcqRel) + 1;
+            match tx.try_send(StreamCmd::Feed(frame.to_vec())) {
+                Ok(()) => {
+                    self.queue_high_water.fetch_max(queued, Ordering::AcqRel);
+                }
+                Err(mpsc::TrySendError::Full(_)) => {
+                    self.queued_frames.fetch_sub(1, Ordering::AcqRel);
+                    let dropped = self.dropped_frames.fetch_add(1, Ordering::AcqRel) + 1;
+                    if dropped == 1 {
+                        warn!(
+                            "Live preview queue reached its {}-frame limit; dropping preview frames and marking the stream incomplete",
+                            STREAM_QUEUE_CAPACITY_FRAMES
+                        );
+                        log_memory_snapshot("live transcription queue overflow");
+                    }
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => {
+                    self.queued_frames.fetch_sub(1, Ordering::AcqRel);
+                    self.open.store(false, Ordering::Release);
+                }
+            }
         }
+    }
+
+    fn record_feed_dequeued(&self) {
+        let _ = self
+            .queued_frames
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
+                Some(queued.saturating_sub(1))
+            });
+    }
+
+    fn was_incomplete(&self) -> bool {
+        self.dropped_frames.load(Ordering::Acquire) > 0
+    }
+
+    fn log_queue_summary(&self) {
+        info!(
+            "Live preview queue summary: capacity_frames={}, queued_frames={}, high_water_frames={}, dropped_frames={}",
+            STREAM_QUEUE_CAPACITY_FRAMES,
+            self.queued_frames.load(Ordering::Acquire),
+            self.queue_high_water.load(Ordering::Acquire),
+            self.dropped_frames.load(Ordering::Acquire),
+        );
     }
 
     /// Whether a stream is pending or active.
@@ -1039,9 +1093,12 @@ impl TranscriptionManager {
             );
 
             let mut perf = StreamPerf::new();
+            let mut committed_text = String::new();
+            let mut committed_segments = Vec::new();
             while let Ok(cmd) = rx.recv() {
                 match cmd {
                     StreamCmd::Feed(pcm) => {
+                        self.router.record_feed_dequeued();
                         self.touch_activity();
                         perf.record_feed(pcm.len());
                         let feed_start = Instant::now();
@@ -1056,6 +1113,14 @@ impl TranscriptionManager {
                                 );
                                 if update.committed_changed || update.tentative_changed {
                                     let text = stream.text();
+                                    if update.committed_changed {
+                                        append_stream_text_segment(
+                                            &mut committed_segments,
+                                            &mut committed_text,
+                                            &text.committed,
+                                            update.audio_committed_ms,
+                                        );
+                                    }
                                     perf.record_emit();
                                     let (committed, tentative) = preview_script.convert(
                                         &text.committed,
@@ -1097,11 +1162,31 @@ impl TranscriptionManager {
                                     }
                                     resolved => resolved.clone(),
                                 };
-                                Some(FinalizedStreamText {
-                                    text: stream.text().full,
-                                    output_language,
-                                    supported_languages: languages.clone(),
-                                })
+                                let text = stream.text();
+                                append_stream_text_segment(
+                                    &mut committed_segments,
+                                    &mut committed_text,
+                                    &text.committed,
+                                    update.audio_committed_ms,
+                                );
+                                let display = text.display();
+                                append_stream_text_segment(
+                                    &mut committed_segments,
+                                    &mut committed_text,
+                                    &display,
+                                    update.input_received_ms.max(update.audio_committed_ms),
+                                );
+                                if committed_segments.is_empty() {
+                                    Some(FinalizedStreamText { output: TranscriptionOutput::text_only(
+                                        display,
+                                        perf.streamed_samples as usize,
+                                    ), output_language: output_language.clone(), supported_languages: languages.clone() })
+                                } else {
+                                    Some(FinalizedStreamText { output: TranscriptionOutput {
+                                        text: display,
+                                        segments: std::mem::take(&mut committed_segments),
+                                    }, output_language, supported_languages: languages.clone() })
+                                }
                             }
                             Err(e) => {
                                 perf.record_compute(finalize_start.elapsed());
@@ -1113,7 +1198,7 @@ impl TranscriptionManager {
                             }
                         };
                         let chars = match &result {
-                            Some(finalized) => finalized.text.len(),
+                            Some(finalized) => finalized.output.text.len(),
                             _ => 0,
                         };
                         perf.log_finalized(chars);
@@ -1166,7 +1251,8 @@ impl TranscriptionManager {
         }
     }
 
-    /// Flush the active stream and return its final, post-filtered text.
+    /// Flush the active stream and return final, post-filtered text plus
+    /// timestamped segments accumulated from its append-only committed prefix.
     ///
     /// `Ok(None)` means no usable stream was active and the caller may fall back
     /// to batch transcription. `Err` means finalize itself failed or timed out.
@@ -1174,13 +1260,30 @@ impl TranscriptionManager {
     /// should surface it instead of immediately starting a batch fallback.
     /// Finalize a stream while retaining its model for an immediate batch
     /// fallback. The eventual stream result or batch owns applying unload policy.
-    pub fn finalize_stream_retaining_model(&self) -> Result<Option<String>> {
+    pub fn finalize_stream_retaining_model(&self) -> Result<Option<TranscriptionOutput>> {
         let Some(tx) = self.router.take() else {
             return Ok(None);
         };
+        let stream_was_incomplete = self.router.was_incomplete();
         let (reply_tx, reply_rx) = mpsc::channel();
-        if tx.send(StreamCmd::Finalize(reply_tx)).is_err() {
-            return Ok(None);
+        let finalize_send_started = Instant::now();
+        let mut finalize_cmd = StreamCmd::Finalize(reply_tx);
+        loop {
+            match tx.try_send(finalize_cmd) {
+                Ok(()) => break,
+                Err(mpsc::TrySendError::Full(cmd)) => {
+                    if finalize_send_started.elapsed() >= STREAM_FINALIZE_REPLY_TIMEOUT {
+                        self.stream_active.store(false, Ordering::Release);
+                        return Err(anyhow::anyhow!(
+                            "Timed out waiting {:?} to enqueue live transcription finalization (queue remained full)",
+                            STREAM_FINALIZE_REPLY_TIMEOUT
+                        ));
+                    }
+                    finalize_cmd = cmd;
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => return Ok(None),
+            }
         }
         let finalized = match reply_rx.recv_timeout(STREAM_FINALIZE_REPLY_TIMEOUT) {
             Ok(Some(finalized)) => finalized,
@@ -1196,17 +1299,33 @@ impl TranscriptionManager {
         };
 
         let settings = get_settings(&self.app_handle);
+        self.router.log_queue_summary();
+        if stream_was_incomplete {
+            warn!(
+                "Live preview result is incomplete because input frames were dropped; falling back to batch transcription"
+            );
+            return Ok(None);
+        }
         // Streaming models do not receive a decode prompt, so custom words
         // always go through the shared fuzzy post-correction path.
-        let filtered = post_process_transcription_text(
-            finalized.text,
-            &settings,
-            false,
-            &finalized.output_language,
-            &finalized.supported_languages,
-        );
+        let mut output = finalized.output;
+        let filtered = post_process_transcription_text(output.text.clone(), &settings, false, &finalized.output_language, &finalized.supported_languages);
+        if filtered != output.text {
+            let audio_len = output
+                .segments
+                .last()
+                .map_or(0, |segment| segment.end_ms.saturating_mul(16) as usize);
+            output = post_process_transcription_output_segments(
+                output, filtered, &settings, false, audio_len, &finalized.output_language, &finalized.supported_languages,
+            );
+        }
 
-        Ok(Some(filtered))
+        info!(
+            "Live preview output ready: chars={}, segments={}",
+            output.text.len(),
+            output.segments.len(),
+        );
+        Ok(Some(output))
     }
 
     /// Abandon any active stream without producing text (e.g. on cancel).
@@ -1235,27 +1354,35 @@ impl TranscriptionManager {
     }
 
     pub fn transcribe(&self, audio: Vec<f32>) -> Result<String> {
-        self.transcribe_detailed(audio).map(|output| output.text)
+        self.transcribe_shared(Arc::new(audio))
     }
 
     /// Transcribe one part of a larger operation without applying the user's
     /// immediate-unload policy between parts.
     pub fn transcribe_retaining_model(&self, audio: Vec<f32>) -> Result<String> {
-        self.transcribe_detailed_with_options(audio, false, ModelRetention::Retain)
+        self.transcribe_detailed_with_options(Arc::new(audio), false, ModelRetention::Retain)
             .map(|output| output.text)
     }
 
-    pub fn transcribe_detailed(&self, audio: Vec<f32>) -> Result<TranscriptionOutput> {
+    pub fn transcribe_shared(&self, audio: Arc<Vec<f32>>) -> Result<String> {
+        self.transcribe_detailed_shared(audio)
+            .map(|output| output.text)
+    }
+
+    pub fn transcribe_detailed_shared(&self, audio: Arc<Vec<f32>>) -> Result<TranscriptionOutput> {
         self.transcribe_bounded_batch(audio, false)
     }
 
-    pub fn transcribe_detailed_for_context(&self, audio: Vec<f32>) -> Result<TranscriptionOutput> {
+    pub fn transcribe_detailed_for_context_shared(
+        &self,
+        audio: Arc<Vec<f32>>,
+    ) -> Result<TranscriptionOutput> {
         self.transcribe_bounded_batch(audio, true)
     }
 
     fn transcribe_bounded_batch(
         &self,
-        audio: Vec<f32>,
+        audio: Arc<Vec<f32>>,
         prefer_word_timestamps: bool,
     ) -> Result<TranscriptionOutput> {
         // A finalized stream may have applied the immediate-unload policy
@@ -1330,7 +1457,7 @@ impl TranscriptionManager {
         );
 
         let output = self.transcribe_detailed_with_options(
-            chunk,
+            Arc::new(chunk),
             prefer_word_timestamps,
             ModelRetention::Retain,
         )?;
@@ -1347,7 +1474,7 @@ impl TranscriptionManager {
 
     fn transcribe_detailed_with_options(
         &self,
-        audio: Vec<f32>,
+        audio: Arc<Vec<f32>>,
         prefer_word_timestamps: bool,
         model_retention: ModelRetention,
     ) -> Result<TranscriptionOutput> {
@@ -1364,7 +1491,15 @@ impl TranscriptionManager {
         let st = std::time::Instant::now();
         let audio_len = audio.len();
 
-        debug!("Audio vector length: {}", audio_len);
+        info!(
+            "Transcription input: samples={}, duration={:.2}s, pcm_bytes={}, shared_owners={}, detailed_timestamps={}",
+            audio_len,
+            audio_len as f64 / 16_000.0,
+            audio_len.saturating_mul(std::mem::size_of::<f32>()),
+            Arc::strong_count(&audio),
+            prefer_word_timestamps,
+        );
+        log_memory_snapshot("transcription manager entry");
 
         if audio.is_empty() {
             debug!("Empty audio vector");
@@ -1477,6 +1612,7 @@ impl TranscriptionManager {
 
             let transcribe_result = catch_unwind(AssertUnwindSafe(
                 || -> Result<TranscriptionOutput> {
+                    log_memory_snapshot("before native transcription");
                     match &mut engine {
                         LoadedEngine::TranscribeCpp(session) => {
                             // Custom words become the initial prompt ONLY for models
@@ -1615,6 +1751,7 @@ impl TranscriptionManager {
 
             let text = match transcribe_result {
                 Ok(inner_result) => {
+                    log_memory_snapshot("after native transcription");
                     // Success or normal error: return the engine unless a model
                     // switch/unload invalidated it while it was in use.
                     self.return_engine(engine, &active_model);
@@ -1718,6 +1855,7 @@ impl TranscriptionManager {
         if matches!(model_retention, ModelRetention::ApplyUnloadPolicy) {
             self.maybe_unload_immediately("transcription");
         }
+        log_memory_snapshot("transcription manager exit");
 
         Ok(output)
     }
@@ -1872,6 +2010,43 @@ fn is_cjk_character(character: char) -> bool {
     )
 }
 
+fn append_stream_text_segment(
+    segments: &mut Vec<TranscriptionSegment>,
+    previous_text: &mut String,
+    current_text: &str,
+    end_ms: i64,
+) {
+    if current_text == previous_text {
+        return;
+    }
+
+    let (start_ms, appended) = match current_text.strip_prefix(previous_text.as_str()) {
+        Some(appended) => (
+            segments.last().map_or(0, |segment| segment.end_ms),
+            appended,
+        ),
+        None => {
+            // The streaming API documents `committed` as append-only. Recover
+            // conservatively if a backend violates that contract: replace the
+            // stale timing history with one segment covering the latest text.
+            warn!("Live preview committed text rewrote its prefix; rebuilding stream segments");
+            segments.clear();
+            (0, current_text)
+        }
+    };
+
+    let appended = appended.trim();
+    if !appended.is_empty() {
+        segments.push(TranscriptionSegment {
+            start_ms,
+            end_ms: (end_ms.max(0) as u64).max(start_ms),
+            text: appended.to_string(),
+        });
+    }
+    previous_text.clear();
+    previous_text.push_str(current_text);
+}
+
 fn seconds_to_ms(seconds: f32) -> u64 {
     (seconds.max(0.0) * 1000.0).round() as u64
 }
@@ -2023,6 +2198,7 @@ struct StreamPerf {
     streamed_samples: u64,
     stream_compute_elapsed: Duration,
     last_log: Instant,
+    last_memory_log: Instant,
     latest_revision: i32,
     latest_input_received_ms: i64,
     latest_audio_committed_ms: i64,
@@ -2037,6 +2213,7 @@ impl StreamPerf {
             streamed_samples: 0,
             stream_compute_elapsed: Duration::ZERO,
             last_log: Instant::now(),
+            last_memory_log: Instant::now(),
             latest_revision: 0,
             latest_input_received_ms: 0,
             latest_audio_committed_ms: 0,
@@ -2091,6 +2268,10 @@ impl StreamPerf {
             self.feed_count,
             self.emit_count,
         );
+        if self.last_memory_log.elapsed() >= STREAM_MEMORY_LOG_INTERVAL {
+            log_memory_snapshot("live transcription stream progress");
+            self.last_memory_log = Instant::now();
+        }
         self.last_log = Instant::now();
     }
 
@@ -2112,6 +2293,7 @@ impl StreamPerf {
             self.emit_count,
             chars
         );
+        log_memory_snapshot("live transcription stream finalized");
     }
 
     fn audio_secs(&self) -> f64 {
@@ -3249,6 +3431,64 @@ mod tests {
         assert_eq!(output.segments[2].start_ms, 600);
         assert_eq!(output.segments[2].end_ms, 800);
         assert_eq!(output.segments[2].text, "thought");
+    }
+
+    #[test]
+    fn streaming_commits_become_incremental_timestamped_segments() {
+        let mut segments = Vec::new();
+        let mut previous = String::new();
+
+        append_stream_text_segment(&mut segments, &mut previous, "hello", 500);
+        append_stream_text_segment(&mut segments, &mut previous, "hello brave world", 1_200);
+        append_stream_text_segment(
+            &mut segments,
+            &mut previous,
+            "hello brave world again",
+            1_700,
+        );
+
+        assert_eq!(segments.len(), 3);
+        assert_eq!(segments[0].text, "hello");
+        assert_eq!((segments[0].start_ms, segments[0].end_ms), (0, 500));
+        assert_eq!(segments[1].text, "brave world");
+        assert_eq!((segments[1].start_ms, segments[1].end_ms), (500, 1_200));
+        assert_eq!(segments[2].text, "again");
+        assert_eq!((segments[2].start_ms, segments[2].end_ms), (1_200, 1_700));
+    }
+
+    #[test]
+    fn streaming_prefix_rewrite_rebuilds_stale_segments() {
+        let mut segments = Vec::new();
+        let mut previous = String::new();
+        append_stream_text_segment(&mut segments, &mut previous, "old prefix", 500);
+
+        append_stream_text_segment(&mut segments, &mut previous, "new result", 900);
+
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].text, "new result");
+        assert_eq!((segments[0].start_ms, segments[0].end_ms), (0, 900));
+    }
+
+    #[test]
+    fn streaming_input_queue_is_bounded() {
+        let router = StreamRouter::new();
+        let _receiver = router.open();
+        let frame = vec![0.0; 480];
+
+        for _ in 0..=STREAM_QUEUE_CAPACITY_FRAMES {
+            router.feed(&frame);
+        }
+
+        assert_eq!(
+            router.queued_frames.load(Ordering::Acquire),
+            STREAM_QUEUE_CAPACITY_FRAMES as u64
+        );
+        assert_eq!(
+            router.queue_high_water.load(Ordering::Acquire),
+            STREAM_QUEUE_CAPACITY_FRAMES as u64
+        );
+        assert_eq!(router.dropped_frames.load(Ordering::Acquire), 1);
+        assert!(router.was_incomplete());
     }
 }
 

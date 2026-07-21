@@ -1,8 +1,16 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Trans, useTranslation } from "react-i18next";
 import { type as osType } from "@tauri-apps/plugin-os";
+import { listen } from "@tauri-apps/api/event";
 import { RefreshCcw } from "lucide-react";
+import { toast } from "sonner";
 import { commands } from "@/bindings";
+import {
+  formatKeyCombination,
+  getKeyName,
+  normalizeKey,
+} from "@/lib/utils/keyboard";
+import type { Result } from "@/bindings";
 
 import { Alert } from "../../ui/Alert";
 import {
@@ -21,8 +29,25 @@ import { BaseUrlField } from "../PostProcessingSettingsApi/BaseUrlField";
 import { ApiKeyField } from "../PostProcessingSettingsApi/ApiKeyField";
 import { ModelSelect } from "../PostProcessingSettingsApi/ModelSelect";
 import { usePostProcessProviderState } from "../PostProcessingSettingsApi/usePostProcessProviderState";
-import { ShortcutInput } from "../ShortcutInput";
 import { useSettings } from "../../../hooks/useSettings";
+import { useOsType } from "../../../hooks/useOsType";
+
+const promptHotkeyBindingId = (promptId: string) =>
+  `post_process_prompt:${promptId}`;
+
+const unwrapCommandResult = <T,>(result: Result<T, string>): T => {
+  if (result.status === "error") {
+    throw new Error(result.error);
+  }
+  return result.data;
+};
+
+interface HandyKeysEvent {
+  modifiers: string[];
+  key: string | null;
+  is_key_down: boolean;
+  hotkey_string: string;
+}
 
 const PostProcessingSettingsApiComponent: React.FC = () => {
   const { t } = useTranslation();
@@ -142,6 +167,318 @@ const PostProcessingSettingsApiComponent: React.FC = () => {
         </SettingContainer>
       )}
     </>
+  );
+};
+
+interface PromptHotkeyInputProps {
+  promptId: string;
+  hotkey?: string | null;
+  disabled?: boolean;
+}
+
+const PromptHotkeyInput: React.FC<PromptHotkeyInputProps> = ({
+  promptId,
+  hotkey,
+  disabled = false,
+}) => {
+  const { t } = useTranslation();
+  const { getSetting, refreshSettings } = useSettings();
+  const keyboardImplementation = getSetting("keyboard_implementation");
+  const currentOsType = useOsType();
+  const [isRecording, setIsRecording] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [currentKeys, setCurrentKeys] = useState("");
+  const shortcutRef = useRef<HTMLButtonElement | null>(null);
+  const unlistenRef = useRef<(() => void) | null>(null);
+  const pressedKeysRef = useRef<string[]>([]);
+  const recordedKeysRef = useRef<string[]>([]);
+  const currentKeysRef = useRef("");
+
+  const resetRecordingState = useCallback(() => {
+    setIsRecording(false);
+    setCurrentKeys("");
+    currentKeysRef.current = "";
+    pressedKeysRef.current = [];
+    recordedKeysRef.current = [];
+  }, []);
+
+  const restorePromptHotkey = useCallback(async () => {
+    try {
+      unwrapCommandResult(
+        await commands.resumePostProcessPromptHotkey(promptId),
+      );
+    } catch (error) {
+      console.error(error);
+    }
+  }, [promptId]);
+
+  const commitHotkey = useCallback(
+    async (nextHotkey: string) => {
+      setIsSaving(true);
+      try {
+        const result = await commands.changePostProcessPromptHotkey(
+          promptId,
+          nextHotkey,
+        );
+        if (result.status === "error") {
+          throw new Error(result.error);
+        }
+        if (!result.data.success) {
+          throw new Error(result.data.error || "Failed to update shortcut");
+        }
+        await refreshSettings();
+      } catch (error) {
+        console.error("Failed to change prompt hotkey:", error);
+        toast.error(
+          t("settings.general.shortcut.errors.set", {
+            error: String(error),
+          }),
+        );
+      } finally {
+        setIsSaving(false);
+        resetRecordingState();
+      }
+    },
+    [promptId, refreshSettings, resetRecordingState, t],
+  );
+
+  const cancelRecording = useCallback(async () => {
+    if (!isRecording) return;
+
+    if (unlistenRef.current) {
+      unlistenRef.current();
+      unlistenRef.current = null;
+    }
+    if (keyboardImplementation === "handy_keys") {
+      try {
+        unwrapCommandResult(await commands.stopHandyKeysRecording());
+      } catch (error) {
+        console.error(error);
+      }
+    } else {
+      await restorePromptHotkey();
+    }
+    resetRecordingState();
+  }, [
+    isRecording,
+    keyboardImplementation,
+    resetRecordingState,
+    restorePromptHotkey,
+  ]);
+
+  useEffect(() => {
+    if (!isRecording || keyboardImplementation === "handy_keys") return;
+
+    let cleanup = false;
+    const modifiers = [
+      "ctrl",
+      "control",
+      "shift",
+      "alt",
+      "option",
+      "meta",
+      "command",
+      "cmd",
+      "super",
+      "win",
+      "windows",
+    ];
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (cleanup || event.repeat) return;
+      event.preventDefault();
+
+      const key = normalizeKey(getKeyName(event, currentOsType));
+      if (!pressedKeysRef.current.includes(key)) {
+        pressedKeysRef.current = [...pressedKeysRef.current, key];
+      }
+      if (!recordedKeysRef.current.includes(key)) {
+        recordedKeysRef.current = [...recordedKeysRef.current, key];
+      }
+      setCurrentKeys(recordedKeysRef.current.join("+"));
+    };
+
+    const handleKeyUp = (event: KeyboardEvent) => {
+      if (cleanup) return;
+      event.preventDefault();
+
+      const key = normalizeKey(getKeyName(event, currentOsType));
+      pressedKeysRef.current = pressedKeysRef.current.filter((k) => k !== key);
+
+      if (
+        pressedKeysRef.current.length === 0 &&
+        recordedKeysRef.current.length > 0
+      ) {
+        const sortedKeys = [...recordedKeysRef.current].sort((a, b) => {
+          const aIsModifier = modifiers.includes(a.toLowerCase());
+          const bIsModifier = modifiers.includes(b.toLowerCase());
+          if (aIsModifier && !bIsModifier) return -1;
+          if (!aIsModifier && bIsModifier) return 1;
+          return 0;
+        });
+        commitHotkey(sortedKeys.join("+"));
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("keyup", handleKeyUp);
+
+    return () => {
+      cleanup = true;
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("keyup", handleKeyUp);
+    };
+  }, [commitHotkey, currentOsType, isRecording, keyboardImplementation]);
+
+  useEffect(() => {
+    if (!isRecording || keyboardImplementation !== "handy_keys") return;
+
+    let cleanup = false;
+    const setupListener = async () => {
+      const unlisten = await listen<HandyKeysEvent>(
+        "handy-keys-event",
+        async (event) => {
+          if (cleanup) return;
+
+          const { hotkey_string: hotkeyString, is_key_down: isKeyDown } =
+            event.payload;
+          if (isKeyDown && hotkeyString) {
+            currentKeysRef.current = hotkeyString;
+            setCurrentKeys(hotkeyString);
+          } else if (!isKeyDown && currentKeysRef.current) {
+            const keysToCommit = currentKeysRef.current;
+            if (unlistenRef.current) {
+              unlistenRef.current();
+              unlistenRef.current = null;
+            }
+            try {
+              unwrapCommandResult(await commands.stopHandyKeysRecording());
+            } catch (error) {
+              console.error(error);
+            }
+            await commitHotkey(keysToCommit);
+          }
+        },
+      );
+
+      unlistenRef.current = unlisten;
+    };
+
+    setupListener();
+
+    return () => {
+      cleanup = true;
+      if (unlistenRef.current) {
+        unlistenRef.current();
+        unlistenRef.current = null;
+      }
+      commands
+        .stopHandyKeysRecording()
+        .then(unwrapCommandResult)
+        .catch(console.error);
+    };
+  }, [commitHotkey, isRecording, keyboardImplementation]);
+
+  useEffect(() => {
+    if (!isRecording) return;
+
+    const handleClickOutside = (event: MouseEvent) => {
+      if (
+        shortcutRef.current &&
+        !shortcutRef.current.contains(event.target as Node)
+      ) {
+        cancelRecording();
+      }
+    };
+
+    window.addEventListener("click", handleClickOutside);
+    return () => window.removeEventListener("click", handleClickOutside);
+  }, [cancelRecording, isRecording]);
+
+  const startRecording = async () => {
+    if (disabled || isRecording || isSaving) return;
+
+    try {
+      if (keyboardImplementation === "handy_keys") {
+        unwrapCommandResult(
+          await commands.startHandyKeysRecording(
+            promptHotkeyBindingId(promptId),
+          ),
+        );
+      } else {
+        unwrapCommandResult(
+          await commands.suspendPostProcessPromptHotkey(promptId),
+        );
+      }
+      resetRecordingState();
+      setIsRecording(true);
+    } catch (error) {
+      console.error("Failed to start prompt hotkey recording:", error);
+      toast.error(
+        t("settings.general.shortcut.errors.set", { error: String(error) }),
+      );
+    }
+  };
+
+  const resetHotkey = async () => {
+    if (isRecording) {
+      await cancelRecording();
+    }
+
+    setIsSaving(true);
+    try {
+      unwrapCommandResult(
+        await commands.resetPostProcessPromptHotkey(promptId),
+      );
+      await refreshSettings();
+    } catch (error) {
+      console.error("Failed to reset prompt hotkey:", error);
+      toast.error(t("settings.general.shortcut.errors.reset"));
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const visibleHotkey = hotkey?.trim() || "";
+  const displayValue = isRecording
+    ? currentKeys
+      ? formatKeyCombination(currentKeys, currentOsType)
+      : t("settings.general.shortcut.pressKeys")
+    : visibleHotkey
+      ? formatKeyCombination(visibleHotkey, currentOsType)
+      : t("settings.postProcessing.prompts.hotkey.none");
+
+  return (
+    <div className="space-y-2 flex flex-col">
+      <div className="space-y-1">
+        <label className="text-sm font-semibold">
+          {t("settings.postProcessing.prompts.hotkey.label")}
+        </label>
+        <p className="text-xs text-mid-gray/70">
+          {t("settings.postProcessing.prompts.hotkey.description")}
+        </p>
+      </div>
+      <div className="flex items-center space-x-1">
+        <button
+          ref={shortcutRef}
+          type="button"
+          className={
+            isRecording
+              ? "px-2 py-1 text-sm font-semibold border border-logo-primary bg-logo-primary/30 rounded-md"
+              : "px-2 py-1 text-sm font-semibold bg-mid-gray/10 border border-mid-gray/80 hover:bg-logo-primary/10 rounded-md cursor-pointer hover:border-logo-primary disabled:cursor-not-allowed disabled:opacity-60"
+          }
+          disabled={disabled || isSaving}
+          onClick={startRecording}
+        >
+          {displayValue}
+        </button>
+        <ResetButton
+          onClick={resetHotkey}
+          disabled={disabled || isSaving || !visibleHotkey}
+          ariaLabel={t("settings.postProcessing.prompts.hotkey.reset")}
+        />
+      </div>
+    </div>
   );
 };
 
@@ -306,6 +643,11 @@ const PostProcessingSettingsPromptsComponent: React.FC = () => {
               />
             </div>
 
+            <PromptHotkeyInput
+              promptId={selectedPrompt.id}
+              hotkey={selectedPrompt.hotkey}
+            />
+
             <div className="space-y-2 flex flex-col">
               <label className="text-sm font-semibold">
                 {t("settings.postProcessing.prompts.promptInstructions")}
@@ -463,14 +805,6 @@ export const PostProcessingSettings: React.FC = () => {
 
   return (
     <div className="max-w-3xl w-full mx-auto space-y-6">
-      <SettingsGroup title={t("settings.postProcessing.hotkey.title")}>
-        <ShortcutInput
-          shortcutId="transcribe_with_post_process"
-          descriptionMode="tooltip"
-          grouped={true}
-        />
-      </SettingsGroup>
-
       <SettingsGroup title={t("settings.postProcessing.api.title")}>
         <PostProcessingSettingsApi />
       </SettingsGroup>

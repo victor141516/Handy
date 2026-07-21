@@ -468,7 +468,13 @@
         "createPrompt": "Créer le prompt",
         "cancel": "Annuler",
         "selectToEdit": "Sélectionnez un prompt ci-dessus pour voir et modifier ses détails.",
-        "createFirst": "Cliquez sur 'Créer un nouveau prompt' ci-dessus pour créer votre premier prompt de post-traitement."
+        "createFirst": "Cliquez sur 'Créer un nouveau prompt' ci-dessus pour créer votre premier prompt de post-traitement.",
+        "hotkey": {
+          "label": "Hotkey",
+          "description": "Optional shortcut that records and post-processes with this prompt.",
+          "none": "None",
+          "reset": "Clear prompt hotkey"
+        }
       }
     },
     "history": {
@@ -485,7 +491,12 @@
       "retranscribe": "Re-transcrire",
       "retranscribeError": "Impossible de re-transcrire. Veuillez réessayer.",
       "transcribing": "Transcription en cours...",
-      "transcriptionFailed": "La transcription a échoué. Vous pouvez re-transcrire en utilisant l'icône de réessai."
+      "transcriptionFailed": "La transcription a échoué. Vous pouvez re-transcrire en utilisant l'icône de réessai.",
+      "postProcess": "Post process",
+      "postProcessing": "Post-processing...",
+      "postProcessCopied": "Post-processed text copied to clipboard.",
+      "postProcessError": "Failed to post-process transcription. Please try again.",
+      "postProcessNoPrompts": "Create a post-processing prompt first"
     },
     "debug": {
       "title": "Débogage",

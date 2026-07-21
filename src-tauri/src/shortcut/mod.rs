@@ -22,7 +22,7 @@ use tauri::{AppHandle, Emitter, Manager};
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use crate::settings::APPLE_INTELLIGENCE_DEFAULT_MODEL_ID;
 use crate::settings::{
-    self, get_settings, AutoSubmitKey, ChineseScript, ClipboardHandling, KeyboardImplementation,
+    self, get_settings, AppSettings, AutoSubmitKey, ChineseScript, ClipboardHandling, KeyboardImplementation,
     LLMPrompt, OverlayPosition, OverlayStyle, PasteMethod, ShortcutActivation, ShortcutBinding,
     SoundTheme, Theme, TypingTool, VadBackend, APPLE_INTELLIGENCE_PROVIDER_ID,
 };
@@ -150,6 +150,71 @@ pub fn unregister_shortcut(app: &AppHandle, binding: ShortcutBinding) -> Result<
 // ============================================================================
 // Binding Management Commands
 // ============================================================================
+
+pub const POST_PROCESS_PROMPT_BINDING_PREFIX: &str = "post_process_prompt:";
+
+pub fn post_process_prompt_binding_id(prompt_id: &str) -> String {
+    format!("{POST_PROCESS_PROMPT_BINDING_PREFIX}{prompt_id}")
+}
+
+pub fn post_process_prompt_id_from_binding_id(binding_id: &str) -> Option<&str> {
+    binding_id
+        .strip_prefix(POST_PROCESS_PROMPT_BINDING_PREFIX)
+        .filter(|prompt_id| !prompt_id.is_empty())
+}
+
+fn post_process_prompt_binding(prompt: &LLMPrompt) -> Option<ShortcutBinding> {
+    let hotkey = prompt.hotkey.as_deref()?.trim();
+    if hotkey.is_empty() {
+        return None;
+    }
+
+    Some(ShortcutBinding {
+        id: post_process_prompt_binding_id(&prompt.id),
+        name: format!("Post process: {}", prompt.name),
+        description: "Records and post-processes with this prompt.".to_string(),
+        default_binding: hotkey.to_string(),
+        current_binding: hotkey.to_string(),
+    })
+}
+
+pub(crate) fn active_shortcut_bindings(settings: &AppSettings) -> Vec<ShortcutBinding> {
+    let default_bindings = settings::get_default_settings().bindings;
+    let mut bindings = Vec::new();
+
+    for (id, default_binding) in default_bindings {
+        if id == "cancel" {
+            continue;
+        }
+
+        bindings.push(
+            settings
+                .bindings
+                .get(&id)
+                .cloned()
+                .unwrap_or(default_binding),
+        );
+    }
+
+    if settings.post_process_enabled {
+        bindings.extend(
+            settings
+                .post_process_prompts
+                .iter()
+                .filter_map(post_process_prompt_binding),
+        );
+    }
+
+    bindings
+}
+
+fn find_prompt_hotkey_binding(settings: &AppSettings, prompt_id: &str) -> Option<ShortcutBinding> {
+    settings
+        .post_process_prompts
+        .iter()
+        .find(|prompt| prompt.id == prompt_id)
+        .and_then(post_process_prompt_binding)
+}
 
 #[derive(Serialize, Type)]
 pub struct BindingResponse {
@@ -331,6 +396,147 @@ pub fn resume_all_bindings(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+#[specta::specta]
+pub fn change_post_process_prompt_hotkey(
+    app: AppHandle,
+    prompt_id: String,
+    binding: String,
+) -> Result<BindingResponse, String> {
+    let binding = binding.trim().to_string();
+    if binding.is_empty() {
+        return Err("Binding cannot be empty".to_string());
+    }
+
+    let mut settings = settings::get_settings(&app);
+    let prompt_exists = settings
+        .post_process_prompts
+        .iter()
+        .any(|prompt| prompt.id == prompt_id);
+    if !prompt_exists {
+        return Err(format!("Prompt with id '{}' not found", prompt_id));
+    }
+
+    let previous_binding = find_prompt_hotkey_binding(&settings, &prompt_id);
+    if settings.post_process_enabled {
+        if let Some(previous_binding) = previous_binding.clone() {
+            if let Err(e) = unregister_shortcut(&app, previous_binding) {
+                warn!(
+                    "change_post_process_prompt_hotkey unregister error for prompt '{}': {}",
+                    prompt_id, e
+                );
+            }
+        }
+    }
+
+    if let Err(e) = validate_shortcut_for_implementation(&binding, settings.keyboard_implementation)
+    {
+        if settings.post_process_enabled {
+            if let Some(previous_binding) = previous_binding {
+                let _ = register_shortcut(&app, previous_binding);
+            }
+        }
+        return Err(e);
+    }
+
+    let prompt_name = settings
+        .post_process_prompts
+        .iter()
+        .find(|prompt| prompt.id == prompt_id)
+        .map(|prompt| prompt.name.clone())
+        .unwrap_or_else(|| prompt_id.clone());
+    let updated_binding = ShortcutBinding {
+        id: post_process_prompt_binding_id(&prompt_id),
+        name: format!("Post process: {prompt_name}"),
+        description: "Records and post-processes with this prompt.".to_string(),
+        default_binding: binding.clone(),
+        current_binding: binding.clone(),
+    };
+
+    if settings.post_process_enabled {
+        if let Err(e) = register_shortcut(&app, updated_binding.clone()) {
+            if let Some(previous_binding) = previous_binding {
+                let _ = register_shortcut(&app, previous_binding);
+            }
+            let error_msg = format!("Failed to register shortcut: {}", e);
+            error!("change_post_process_prompt_hotkey error: {}", error_msg);
+            return Ok(BindingResponse {
+                success: false,
+                binding: None,
+                error: Some(error_msg),
+            });
+        }
+    }
+
+    if let Some(prompt) = settings
+        .post_process_prompts
+        .iter_mut()
+        .find(|prompt| prompt.id == prompt_id)
+    {
+        prompt.hotkey = Some(binding);
+    }
+    settings::write_settings(&app, settings);
+
+    Ok(BindingResponse {
+        success: true,
+        binding: Some(updated_binding),
+        error: None,
+    })
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn reset_post_process_prompt_hotkey(app: AppHandle, prompt_id: String) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+    let previous_binding = find_prompt_hotkey_binding(&settings, &prompt_id);
+    let Some(prompt) = settings
+        .post_process_prompts
+        .iter_mut()
+        .find(|prompt| prompt.id == prompt_id)
+    else {
+        return Err(format!("Prompt with id '{}' not found", prompt_id));
+    };
+
+    if settings.post_process_enabled {
+        if let Some(previous_binding) = previous_binding {
+            if let Err(e) = unregister_shortcut(&app, previous_binding) {
+                warn!(
+                    "reset_post_process_prompt_hotkey unregister error for prompt '{}': {}",
+                    prompt_id, e
+                );
+            }
+        }
+    }
+
+    prompt.hotkey = None;
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn suspend_post_process_prompt_hotkey(app: AppHandle, prompt_id: String) -> Result<(), String> {
+    let settings = settings::get_settings(&app);
+    if settings.post_process_enabled {
+        if let Some(binding) = find_prompt_hotkey_binding(&settings, &prompt_id) {
+            unregister_shortcut(&app, binding)?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn resume_post_process_prompt_hotkey(app: AppHandle, prompt_id: String) -> Result<(), String> {
+    let settings = settings::get_settings(&app);
+    if settings.post_process_enabled {
+        if let Some(binding) = find_prompt_hotkey_binding(&settings, &prompt_id) {
+            register_shortcut(&app, binding)?;
+        }
+    }
+    Ok(())
+}
+
 // ============================================================================
 // Keyboard Implementation Switching
 // ============================================================================
@@ -459,14 +665,15 @@ fn parse_keyboard_implementation(s: &str) -> KeyboardImplementation {
 
 /// Unregister all shortcuts for the current implementation
 fn unregister_all_shortcuts(app: &AppHandle, implementation: KeyboardImplementation) {
-    let bindings = settings::get_bindings(app);
+    let settings = settings::get_settings(app);
 
-    for (id, binding) in bindings {
+    for binding in active_shortcut_bindings(&settings) {
         // Skip cancel shortcut as it's dynamically registered
-        if id == "cancel" {
+        if binding.id == "cancel" {
             continue;
         }
 
+        let binding_id = binding.id.clone();
         let result = match implementation {
             KeyboardImplementation::Tauri => tauri_impl::unregister_shortcut(app, binding),
             KeyboardImplementation::HandyKeys => handy_keys::unregister_shortcut(app, binding),
@@ -475,7 +682,7 @@ fn unregister_all_shortcuts(app: &AppHandle, implementation: KeyboardImplementat
         if let Err(e) = result {
             warn!(
                 "Failed to unregister shortcut '{}' during switch: {}",
-                id, e
+                binding_id, e
             );
         }
     }
@@ -493,11 +700,6 @@ fn register_all_shortcuts_for_implementation(
     for (id, default_binding) in &default_bindings {
         // Skip cancel shortcut as it's dynamically registered
         if id == "cancel" {
-            continue;
-        }
-
-        // Skip post-processing shortcut when the feature is disabled
-        if id == "transcribe_with_post_process" && !current_settings.post_process_enabled {
             continue;
         }
 
@@ -535,6 +737,51 @@ fn register_all_shortcuts_for_implementation(
                 "Failed to register shortcut '{}' for {:?}: {}",
                 id, implementation, e
             );
+        }
+    }
+
+    if current_settings.post_process_enabled {
+        let prompt_ids: Vec<String> = current_settings
+            .post_process_prompts
+            .iter()
+            .map(|prompt| prompt.id.clone())
+            .collect();
+
+        for prompt_id in prompt_ids {
+            let Some(binding) = find_prompt_hotkey_binding(&current_settings, &prompt_id) else {
+                continue;
+            };
+
+            if let Err(e) =
+                validate_shortcut_for_implementation(&binding.current_binding, implementation)
+            {
+                info!(
+                    "Post-process prompt shortcut '{}' ({}) is invalid for {:?}: {}. Clearing it.",
+                    binding.id, binding.current_binding, implementation, e
+                );
+
+                if let Some(prompt) = current_settings
+                    .post_process_prompts
+                    .iter_mut()
+                    .find(|prompt| prompt.id == prompt_id)
+                {
+                    prompt.hotkey = None;
+                }
+                reset_bindings.push(binding.id.clone());
+                continue;
+            }
+
+            let result = match implementation {
+                KeyboardImplementation::Tauri => tauri_impl::register_shortcut(app, binding),
+                KeyboardImplementation::HandyKeys => handy_keys::register_shortcut(app, binding),
+            };
+
+            if let Err(e) = result {
+                error!(
+                    "Failed to register shortcut '{}' for {:?}: {}",
+                    prompt_id, implementation, e
+                );
+            }
         }
     }
 
@@ -1055,11 +1302,10 @@ pub fn change_post_process_enabled_setting(app: AppHandle, enabled: bool) -> Res
     settings.post_process_enabled = enabled;
     settings::write_settings(&app, settings.clone());
 
-    // Register or unregister the post-processing shortcut
-    if let Some(binding) = settings
-        .bindings
-        .get("transcribe_with_post_process")
-        .cloned()
+    for binding in settings
+        .post_process_prompts
+        .iter()
+        .filter_map(post_process_prompt_binding)
     {
         if enabled {
             let _ = register_shortcut(&app, binding);
@@ -1191,6 +1437,7 @@ pub fn add_post_process_prompt(
         id: id.clone(),
         name,
         prompt,
+        hotkey: None,
     };
 
     settings.post_process_prompts.push(new_prompt.clone());
@@ -1233,12 +1480,20 @@ pub fn delete_post_process_prompt(app: AppHandle, id: String) -> Result<(), Stri
         return Err("Cannot delete the last prompt".to_string());
     }
 
+    let binding_to_unregister = find_prompt_hotkey_binding(&settings, &id);
+
     // Find and remove the prompt
     let original_len = settings.post_process_prompts.len();
     settings.post_process_prompts.retain(|p| p.id != id);
 
     if settings.post_process_prompts.len() == original_len {
         return Err(format!("Prompt with id '{}' not found", id));
+    }
+
+    if settings.post_process_enabled {
+        if let Some(binding) = binding_to_unregister {
+            let _ = unregister_shortcut(&app, binding);
+        }
     }
 
     // If the deleted prompt was selected, select the first one or None

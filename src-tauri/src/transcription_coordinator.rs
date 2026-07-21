@@ -548,7 +548,9 @@ impl Drop for ProcessingGuard {
 }
 
 pub fn is_transcribe_binding(id: &str) -> bool {
-    id == "transcribe" || id == "transcribe_with_post_process"
+    id == "transcribe"
+        || id == "transcribe_with_post_process"
+        || crate::shortcut::post_process_prompt_id_from_binding_id(id).is_some()
 }
 
 impl TranscriptionCoordinator {
@@ -721,7 +723,8 @@ fn run_effect(app: &AppHandle, state: &mut CoordinatorState, effect: Effect) {
 /// Execute a start effect; returns whether recording actually began, so the
 /// state machine can roll back its optimistic transition on failure.
 fn start(app: &AppHandle, binding_id: &str, hotkey_string: &str) -> bool {
-    let Some(action) = ACTION_MAP.get(binding_id) else {
+    let action_id = if crate::shortcut::post_process_prompt_id_from_binding_id(binding_id).is_some() { "transcribe_with_post_process" } else { binding_id };
+    let Some(action) = ACTION_MAP.get(action_id) else {
         warn!("No action in ACTION_MAP for '{binding_id}'");
         return false;
     };
@@ -736,7 +739,8 @@ fn start(app: &AppHandle, binding_id: &str, hotkey_string: &str) -> bool {
 }
 
 fn stop(app: &AppHandle, binding_id: &str, hotkey_string: &str) {
-    let Some(action) = ACTION_MAP.get(binding_id) else {
+    let action_id = if crate::shortcut::post_process_prompt_id_from_binding_id(binding_id).is_some() { "transcribe_with_post_process" } else { binding_id };
+    let Some(action) = ACTION_MAP.get(action_id) else {
         warn!("No action in ACTION_MAP for '{binding_id}'");
         return;
     };
@@ -785,6 +789,12 @@ mod tests {
             classify_ptt_event(None, false, false, "transcribe", Some("transcribe")),
             PttAction::Passthrough
         );
+    }
+
+    #[test]
+    fn prompt_post_process_bindings_are_transcribe_bindings() {
+        assert!(is_transcribe_binding("post_process_prompt:prompt_123"));
+        assert!(!is_transcribe_binding("post_process_prompt:"));
     }
 
     #[test]

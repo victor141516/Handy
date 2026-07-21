@@ -19,6 +19,7 @@ use crate::audio_toolkit::{
     vad::{self, VadFrame},
     VoiceActivityDetector,
 };
+use crate::memory_diagnostics::log_memory_snapshot;
 
 enum Cmd {
     /// Begin capturing. Carries the send timestamp so the consumer can log how

@@ -468,7 +468,13 @@
         "createPrompt": "プロンプトを作成",
         "cancel": "キャンセル",
         "selectToEdit": "上からプロンプトを選択して、詳細を表示・編集します。",
-        "createFirst": "上の「新しいプロンプトを作成」をクリックして、最初の後処理プロンプトを作成してください。"
+        "createFirst": "上の「新しいプロンプトを作成」をクリックして、最初の後処理プロンプトを作成してください。",
+        "hotkey": {
+          "label": "Hotkey",
+          "description": "Optional shortcut that records and post-processes with this prompt.",
+          "none": "None",
+          "reset": "Clear prompt hotkey"
+        }
       }
     },
     "history": {
@@ -485,7 +491,12 @@
       "retranscribe": "再文字起こし",
       "retranscribeError": "再文字起こしに失敗しました。もう一度お試しください。",
       "transcribing": "文字起こし中…",
-      "transcriptionFailed": "文字起こしに失敗しました。リトライアイコンを使用して再文字起こしできます。"
+      "transcriptionFailed": "文字起こしに失敗しました。リトライアイコンを使用して再文字起こしできます。",
+      "postProcess": "Post process",
+      "postProcessing": "Post-processing...",
+      "postProcessCopied": "Post-processed text copied to clipboard.",
+      "postProcessError": "Failed to post-process transcription. Please try again.",
+      "postProcessNoPrompts": "Create a post-processing prompt first"
     },
     "debug": {
       "title": "デバッグ",

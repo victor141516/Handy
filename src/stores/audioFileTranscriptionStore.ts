@@ -16,14 +16,34 @@ type AudioFileTranscriptionStatus =
   | "completed"
   | "error";
 
+type AudioFileTranscriptionErrorKind =
+  | "generic"
+  | "liveTranscriptionInProgress";
+
+const LIVE_TRANSCRIPTION_IN_PROGRESS_ERROR =
+  "Another transcription is already in progress";
+
+const messageFromError = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
+const errorKindFromMessage = (
+  message: string,
+): AudioFileTranscriptionErrorKind =>
+  message.includes(LIVE_TRANSCRIPTION_IN_PROGRESS_ERROR)
+    ? "liveTranscriptionInProgress"
+    : "generic";
+
 interface AudioFileTranscriptionStore {
   selectedPath: string | null;
   status: AudioFileTranscriptionStatus;
   completedEntry: HistoryEntry | null;
   errorMessage: string | null;
+  errorKind: AudioFileTranscriptionErrorKind | null;
   chooseAudioFile: (labels: ChooseAudioFileLabels) => Promise<void>;
   transcribeAudioFile: (path: string) => Promise<void>;
   cancelTranscription: () => Promise<void>;
+  clearError: () => void;
+  clearResult: () => void;
 }
 
 export const useAudioFileTranscriptionStore =
@@ -32,6 +52,7 @@ export const useAudioFileTranscriptionStore =
     status: "idle",
     completedEntry: null,
     errorMessage: null,
+    errorKind: null,
 
     chooseAudioFile: async ({ dialogTitle, audioFiles }) => {
       const { status } = get();
@@ -52,9 +73,11 @@ export const useAudioFileTranscriptionStore =
         });
       } catch (dialogError) {
         console.error("Failed to open the audio file picker:", dialogError);
+        const message = messageFromError(dialogError);
         set({
           status: "error",
-          errorMessage: String(dialogError),
+          errorMessage: message,
+          errorKind: "generic",
         });
         return;
       }
@@ -72,6 +95,7 @@ export const useAudioFileTranscriptionStore =
         status: "transcribing",
         completedEntry: null,
         errorMessage: null,
+        errorKind: null,
       });
 
       try {
@@ -89,11 +113,13 @@ export const useAudioFileTranscriptionStore =
           transcriptionError,
         );
         if (get().status === "cancelling") {
-          set({ status: "idle", errorMessage: null });
+          set({ status: "idle", errorMessage: null, errorKind: null });
         } else {
+          const message = messageFromError(transcriptionError);
           set({
             status: "error",
-            errorMessage: String(transcriptionError),
+            errorMessage: message,
+            errorKind: errorKindFromMessage(message),
           });
         }
       }
@@ -102,7 +128,7 @@ export const useAudioFileTranscriptionStore =
     cancelTranscription: async () => {
       if (get().status !== "transcribing") return;
 
-      set({ status: "cancelling", errorMessage: null });
+      set({ status: "cancelling", errorMessage: null, errorKind: null });
       try {
         await commands.cancelOperation();
       } catch (cancelError) {
@@ -111,11 +137,27 @@ export const useAudioFileTranscriptionStore =
           cancelError,
         );
         if (get().status === "cancelling") {
+          const message = messageFromError(cancelError);
           set({
             status: "transcribing",
-            errorMessage: String(cancelError),
+            errorMessage: message,
+            errorKind: "generic",
           });
         }
       }
+    },
+
+    clearError: () => {
+      set({ errorMessage: null, errorKind: null });
+    },
+
+    clearResult: () => {
+      set({
+        selectedPath: null,
+        status: "idle",
+        completedEntry: null,
+        errorMessage: null,
+        errorKind: null,
+      });
     },
   }));

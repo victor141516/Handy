@@ -460,6 +460,12 @@
         "createNew": "Create New Prompt",
         "promptLabel": "Prompt Label",
         "promptLabelPlaceholder": "Enter prompt name",
+        "hotkey": {
+          "label": "Hotkey",
+          "description": "Optional shortcut that records and post-processes with this prompt.",
+          "none": "None",
+          "reset": "Clear prompt hotkey"
+        },
         "promptInstructions": "Prompt Instructions",
         "promptInstructionsPlaceholder": "Write the instructions to run after transcription. Example: Improve grammar and clarity for the following text: ${output}",
         "promptTip": "Tip: Use <code>${output}</code> to insert the transcribed text in your prompt.",
@@ -484,6 +490,11 @@
       "deleteError": "Failed to delete entry. Please try again.",
       "retranscribe": "Re-transcribe",
       "retranscribeError": "Failed to re-transcribe. Please try again.",
+      "postProcess": "Post process",
+      "postProcessing": "Post-processing...",
+      "postProcessCopied": "Post-processed text copied to clipboard.",
+      "postProcessError": "Failed to post-process transcription. Please try again.",
+      "postProcessNoPrompts": "Create a post-processing prompt first",
       "transcribing": "Transcribing...",
       "transcriptionFailed": "Transcription failed. You can re-transcribe using the retry icon."
     },
@@ -748,6 +759,8 @@
     "completed": "Transcription completed and saved to History.",
     "result": "Transcription",
     "openHistory": "Open History",
-    "error": "The audio file could not be transcribed. Check the logs for details and try again."
+    "clearResult": "Clear transcription",
+    "error": "The audio file could not be transcribed. Check the logs for details and try again.",
+    "liveTranscriptionInProgress": "Audio file transcription is not supported while live transcription is in progress."
   }
 }

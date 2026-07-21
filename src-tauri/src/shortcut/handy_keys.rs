@@ -40,7 +40,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::settings::{self, get_settings, ShortcutBinding};
 
-use super::handler::handle_shortcut_event;
+use super::{active_shortcut_bindings, handler::handle_shortcut_event};
 
 /// Commands that can be sent to the hotkey manager thread
 enum ManagerCommand {
@@ -425,29 +425,14 @@ pub fn validate_shortcut(raw: &str) -> Result<(), String> {
 pub fn init_shortcuts(app: &AppHandle) -> Result<(), String> {
     let state = HandyKeysState::new(app.clone())?;
 
-    let default_bindings = settings::get_default_settings().bindings;
     let user_settings = settings::load_or_create_app_settings(app);
 
     // Register all bindings except cancel (which is dynamic)
-    for (id, default_binding) in default_bindings {
-        if id == "cancel" {
-            continue;
-        }
-        // Skip post-processing shortcut when the feature is disabled
-        if id == "transcribe_with_post_process" && !user_settings.post_process_enabled {
-            continue;
-        }
-
-        let binding = user_settings
-            .bindings
-            .get(&id)
-            .cloned()
-            .unwrap_or(default_binding);
-
+    for binding in active_shortcut_bindings(&user_settings) {
         if let Err(e) = state.register(&binding) {
             error!(
                 "Failed to register handy-keys shortcut {} during init: {}",
-                id, e
+                binding.id, e
             );
         }
     }

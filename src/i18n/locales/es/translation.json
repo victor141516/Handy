@@ -468,7 +468,13 @@
         "createPrompt": "Crear prompt",
         "cancel": "Cancelar",
         "selectToEdit": "Selecciona un prompt arriba para ver y editar sus detalles.",
-        "createFirst": "Haz clic en 'Crear nuevo prompt' arriba para crear tu primer prompt de post procesamiento."
+        "createFirst": "Haz clic en 'Crear nuevo prompt' arriba para crear tu primer prompt de post procesamiento.",
+        "hotkey": {
+          "label": "Hotkey",
+          "description": "Optional shortcut that records and post-processes with this prompt.",
+          "none": "None",
+          "reset": "Clear prompt hotkey"
+        }
       }
     },
     "history": {
@@ -485,7 +491,12 @@
       "retranscribe": "Re-transcribir",
       "retranscribeError": "No se pudo re-transcribir. Por favor, inténtalo de nuevo.",
       "transcribing": "Transcribiendo...",
-      "transcriptionFailed": "La transcripción falló. Puedes re-transcribir usando el icono de reintentar."
+      "transcriptionFailed": "La transcripción falló. Puedes re-transcribir usando el icono de reintentar.",
+      "postProcess": "Post process",
+      "postProcessing": "Post-processing...",
+      "postProcessCopied": "Post-processed text copied to clipboard.",
+      "postProcessError": "Failed to post-process transcription. Please try again.",
+      "postProcessNoPrompts": "Create a post-processing prompt first"
     },
     "debug": {
       "title": "Depuración",
@@ -748,6 +759,8 @@
     "completed": "Transcripción completada y guardada en el Historial.",
     "result": "Transcripción",
     "openHistory": "Abrir Historial",
-    "error": "No se ha podido transcribir el archivo de audio. Consulta los registros para obtener más información e inténtalo de nuevo."
+    "clearResult": "Ocultar transcripción",
+    "error": "No se ha podido transcribir el archivo de audio. Consulta los registros para obtener más información e inténtalo de nuevo.",
+    "liveTranscriptionInProgress": "No se puede transcribir un archivo mientras hay una transcripción en vivo en curso."
   }
 }

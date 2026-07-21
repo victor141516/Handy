@@ -1,3 +1,4 @@
+use crate::memory_diagnostics::log_memory_snapshot;
 use crate::settings::PostProcessProvider;
 use log::{debug, error, info};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE, REFERER, USER_AGENT};
@@ -6,6 +7,7 @@ use serde_json::Value;
 use std::collections::HashSet;
 use std::error::Error as StdError;
 use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
 const LLM_PAYLOAD_DEBUG_ENV: &str = "HANDY_DEBUG_LLM_PAYLOAD";
 
@@ -417,7 +419,21 @@ pub async fn send_chat_completion_with_schema(
         &format!("LLM chat completion request body for {url}"),
         &request_body,
     );
+    info!(
+        "LLM request prepared: provider={}, model={}, messages={}, message_bytes={}, structured_output={}",
+        provider.id,
+        model,
+        request_body.messages.len(),
+        request_body
+            .messages
+            .iter()
+            .map(|message| message.content.len())
+            .sum::<usize>(),
+        request_body.response_format.is_some(),
+    );
+    log_memory_snapshot("LLM request prepared");
 
+    let request_started = Instant::now();
     let mut response = client
         .post(&url)
         .json(&request_body)
@@ -486,10 +502,18 @@ pub async fn send_chat_completion_with_schema(
         .await
         .map_err(|e| report_reqwest_error("Failed to parse API response", &e))?;
 
-    Ok(completion
+    let content = completion
         .choices
         .first()
-        .and_then(|choice| choice.message.content.clone()))
+        .and_then(|choice| choice.message.content.clone());
+    info!(
+        "LLM response parsed: elapsed={:?}, choices={}, content_bytes={}",
+        request_started.elapsed(),
+        completion.choices.len(),
+        content.as_ref().map_or(0, String::len),
+    );
+    log_memory_snapshot("LLM response parsed");
+    Ok(content)
 }
 
 /// Fetch available models from an OpenAI-compatible API
