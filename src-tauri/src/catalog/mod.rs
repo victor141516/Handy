@@ -6,6 +6,10 @@
 //! recommended set). It is compiled into the binary so Handy ships a complete
 //! model list with zero network access.
 //!
+//! `fork_catalog.json` contains hand-curated additions for this fork. Keeping
+//! them separate prevents upstream catalog regeneration from removing them.
+//! Mirror configuration belongs to each catalog, not to the merged model list.
+//!
 //! Each entry is normalised into a [`ModelDescriptor`] — the same source-agnostic
 //! shape every other producer (HF discovery, on-disk scans, the legacy table)
 //! yields — so the catalog is "just another producer". Its explicit `capabilities`
@@ -92,7 +96,7 @@ impl From<&CatalogModel> for ModelDescriptor {
             description: m.description.clone(),
             engine_type: EngineType::TranscribeCpp,
             caps: CapabilityProbe {
-                verdict: Compatibility::Compatible, // curated org models we ship support for
+                verdict: Compatibility::Compatible, // curated models we ship support for
                 display_name: None,
                 architecture: m.architecture.clone(),
                 variant: None,
@@ -119,9 +123,22 @@ static ROOT: Lazy<CatalogRoot> = Lazy::new(|| {
         .expect("bundled catalog.json is valid JSON matching the catalog schema")
 });
 
+static FORK_ROOT: Lazy<CatalogRoot> = Lazy::new(|| {
+    serde_json::from_str(include_str!("fork_catalog.json"))
+        .expect("bundled fork_catalog.json is valid JSON matching the catalog schema")
+});
+
+fn catalog_roots() -> [&'static CatalogRoot; 2] {
+    [Lazy::force(&ROOT), Lazy::force(&FORK_ROOT)]
+}
+
 /// The bundled catalog, parsed once and normalised into descriptors.
-pub static CATALOG: Lazy<Vec<ModelDescriptor>> =
-    Lazy::new(|| ROOT.models.iter().map(ModelDescriptor::from).collect());
+pub static CATALOG: Lazy<Vec<ModelDescriptor>> = Lazy::new(|| {
+    catalog_roots()
+        .into_iter()
+        .flat_map(|root| root.models.iter().map(ModelDescriptor::from))
+        .collect()
+});
 
 /// A mirror copy of a catalog model's default file, with the expected content
 /// hash for end-to-end verification. Mirrors are untrusted bit-pipes: the
@@ -141,11 +158,13 @@ pub struct MirrorFile {
 /// (The mirror may only host default quants; a miss there just 404s and the
 /// caller reports it, so listing every quant here costs nothing.)
 pub fn mirror_fallbacks(model_id: &str) -> Vec<MirrorFile> {
-    let Some((m, file)) = ROOT.models.iter().find_map(|m| {
-        m.files
-            .iter()
-            .find(|f| format!("{}/{}", m.id, f.filename) == model_id)
-            .map(|f| (m, f))
+    let Some((root, m, file)) = catalog_roots().into_iter().find_map(|root| {
+        root.models.iter().find_map(|m| {
+            m.files
+                .iter()
+                .find(|f| format!("{}/{}", m.id, f.filename) == model_id)
+                .map(|f| (root, m, f))
+        })
     }) else {
         return Vec::new();
     };
@@ -157,7 +176,7 @@ pub fn mirror_fallbacks(model_id: &str) -> Vec<MirrorFile> {
     let Some(sha256) = file.sha256.as_deref() else {
         return Vec::new();
     };
-    ROOT.mirrors
+    root.mirrors
         .iter()
         .map(|base| MirrorFile {
             url: format!(
@@ -250,11 +269,11 @@ mod tests {
     }
 
     #[test]
-    fn every_catalog_model_has_mirror_fallbacks_with_hashes() {
+    fn every_upstream_catalog_model_has_mirror_fallbacks_with_hashes() {
         // The mirror fallback is the safety net for HF outages and blocked
         // networks; a catalog entry without one (missing revision, missing
         // sha256, empty mirrors) silently loses that net.
-        for d in CATALOG.iter() {
+        for d in ROOT.models.iter().map(ModelDescriptor::from) {
             let mirrors = mirror_fallbacks(&d.id);
             assert!(!mirrors.is_empty(), "{}: no mirror fallbacks", d.id);
             for m in &mirrors {
@@ -267,6 +286,78 @@ mod tests {
                 assert!(m.url.starts_with("https://"), "{}: bad url {}", d.id, m.url);
             }
         }
+    }
+
+    #[test]
+    fn parakeet_ultra_is_downloadable_with_pinned_verified_source() {
+        use crate::managers::model::DiskStatus;
+
+        let (descriptor, file) = file_in_catalog(
+            "parakeet-ultra-0.6b-Q8_0.gguf",
+            Some("Nairod785/parakeet-ultra-gguf"),
+        )
+        .expect("Parakeet Ultra must be in the downloadable catalog");
+        assert_eq!(descriptor.default_quant.as_deref(), Some("Q8_0"));
+        assert!(matches!(descriptor.engine_type, EngineType::TranscribeCpp));
+        assert!(matches!(
+            &descriptor.source,
+            ModelSource::HuggingFace { repo_id, revision }
+                if repo_id == "Nairod785/parakeet-ultra-gguf"
+                    && revision == "b03613ba54a195238f0e915359f5a5c78269ddc6"
+        ));
+        assert_eq!(file.size_bytes, 739_508_704);
+        assert_eq!(
+            file.sha256.as_deref(),
+            Some("283562ac9b513f39244fe23c6632738c167d32731a5f4693319a10ca498550a8")
+        );
+
+        let info = descriptor.to_model_info(&DiskStatus::default());
+        assert_eq!(info.name, "Parakeet Ultra");
+        assert_eq!(info.filename, file.filename);
+        assert!(!info.is_custom);
+        assert!(!info.is_downloaded);
+        assert!(!info.is_directory);
+        assert!(!info.supports_streaming);
+        assert!(!info.supports_translation);
+        assert!(info.supports_language_detection);
+        assert!(info.supports_language_selection);
+        assert_eq!(info.supported_languages.len(), 25);
+        assert!(info.supported_languages.iter().any(|lang| lang == "es"));
+        // Unknown comparative benchmarks must not become fabricated UI scores.
+        assert_eq!(info.speed_score, 0.0);
+        assert_eq!(info.accuracy_score, 0.0);
+    }
+
+    #[test]
+    fn fork_models_do_not_inherit_upstream_mirrors() {
+        for model in &FORK_ROOT.models {
+            for file in &model.files {
+                assert!(mirror_fallbacks(&format!("{}/{}", model.id, file.filename)).is_empty());
+                assert!(file.size_bytes > 0);
+                assert_eq!(file.sha256.as_deref().map(str::len), Some(64));
+            }
+        }
+    }
+
+    #[test]
+    fn parakeet_ultra_alternate_quants_keep_catalog_metadata() {
+        use crate::managers::model::DiskStatus;
+
+        let filename = "parakeet-ultra-0.6b-Q4_K_M.gguf";
+        let (descriptor, file) = file_in_catalog(filename, Some("Nairod785/parakeet-ultra-gguf"))
+            .expect("alternate quants must be recognised on disk");
+        let info = descriptor.to_model_info_for_file(
+            file,
+            &DiskStatus {
+                is_downloaded: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(info.name, "Parakeet Ultra (Q4_K_M)");
+        assert_eq!(info.id, format!("Nairod785/parakeet-ultra-gguf/{filename}"));
+        assert!(info.is_downloaded);
+        assert!(!info.is_custom);
+        assert!(file_in_catalog(filename, Some("unrelated/repo")).is_none());
     }
 
     #[test]

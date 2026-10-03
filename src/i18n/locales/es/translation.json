@@ -56,6 +56,10 @@
         "name": "Parakeet V3",
         "description": "Rápido y preciso"
       },
+      "Nairod785/parakeet-ultra-gguf/parakeet-ultra-0.6b-Q8_0.gguf": {
+        "name": "Parakeet Ultra",
+        "description": "Parakeet V3 con entrenamiento adicional de Moondream, compatible con 25 idiomas europeos. Sin transcripción en directo ni traducción."
+      },
       "moonshine-base": {
         "name": "Moonshine Base",
         "description": "Muy rápido, solo inglés. Maneja bien los acentos."

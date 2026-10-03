@@ -1,4 +1,5 @@
 import catalog from "../src-tauri/src/catalog/catalog.json";
+import forkCatalog from "../src-tauri/src/catalog/fork_catalog.json";
 import {
   MODEL_CAPABILITY_LANGUAGES,
   supportsLanguageCode,
@@ -23,7 +24,10 @@ if (
   );
 }
 
-for (const model of catalog.models as CatalogModel[]) {
+for (const model of [
+  ...catalog.models,
+  ...forkCatalog.models,
+] as CatalogModel[]) {
   for (const modelLanguage of model.languages ?? []) {
     const matchingIntents = MODEL_CAPABILITY_LANGUAGES.filter((language) =>
       supportsLanguageCode([modelLanguage], language.value),

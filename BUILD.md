@@ -2,6 +2,35 @@
 
 This guide covers how to set up the development environment and build Handy from source across different platforms.
 
+## Fork model additions: Parakeet Ultra
+
+This fork includes [Moondream's Parakeet Ultra](https://huggingface.co/moondream/parakeet-ultra)
+via the [Nairod785 GGUF conversion](https://huggingface.co/Nairod785/parakeet-ultra-gguf).
+It uses Handy's existing `transcribe.cpp` engine; no new backend is required.
+In **Models**, search for **Parakeet Ultra** and download the default Q8_0 file
+(about 705 MiB). Existing Parakeet models remain available.
+
+The model supports 25 European languages, including Spanish, automatic language
+detection and timestamps. It does not support live streaming or translation.
+The conversion omits Photon's auxiliary VAD head; Handy retains its own VAD.
+Original weights and the conversion are attributed above under CC-BY-4.0.
+
+The hand-curated entry lives in `src-tauri/src/catalog/fork_catalog.json`, separate
+from the generated upstream catalog. The entry pins an immutable Hugging Face
+revision and records the files' SHA-256 hashes. There is no upstream blob mirror for this third-party
+model. Comparative score bars are omitted until comparable benchmarks exist.
+
+Q8_0 has been tested with this application's headless transcription path on
+Windows, using CPU and Vulkan, with English and German speech. This verifies
+compatibility, not an accuracy improvement on your own recordings. macOS/Metal
+and Linux have not been exercised for this model in this fork.
+
+After downloading it, reproduce a transcription with your own WAV file:
+
+```bash
+handy --model Nairod785/parakeet-ultra-gguf/parakeet-ultra-0.6b-Q8_0.gguf --transcribe-file recording.wav --json
+```
+
 ## Prerequisites
 
 ### All Platforms

@@ -1,0 +1,91 @@
+{
+  "catalog_version": 2,
+  "mirrors": [],
+  "models": [
+    {
+      "id": "Nairod785/parakeet-ultra-gguf",
+      "revision": "b03613ba54a195238f0e915359f5a5c78269ddc6",
+      "name": "Parakeet Ultra",
+      "architecture": "parakeet",
+      "family": "parakeet",
+      "parameters": "0.6B",
+      "description": "Moondream's post-trained Parakeet V3, supporting 25 European languages. No live streaming or translation.",
+      "base_model": "moondream/parakeet-ultra",
+      "license": "cc-by-4.0",
+      "source_url": "https://huggingface.co/moondream/parakeet-ultra",
+      "conversion_url": "https://huggingface.co/Nairod785/parakeet-ultra-gguf",
+      "conversion_note": "GGUF conversion for stock transcribe.cpp. Photon's auxiliary VAD head is omitted; Handy uses its own VAD.",
+      "score_note": "Comparative speed/accuracy scores are unavailable on the upstream catalog benchmark; null hides the UI bars.",
+      "languages": [
+        "bg",
+        "hr",
+        "cs",
+        "da",
+        "nl",
+        "en",
+        "et",
+        "fi",
+        "fr",
+        "de",
+        "el",
+        "hu",
+        "it",
+        "lv",
+        "lt",
+        "mt",
+        "pl",
+        "pt",
+        "ro",
+        "ru",
+        "sk",
+        "sl",
+        "es",
+        "sv",
+        "uk"
+      ],
+      "capabilities": {
+        "streaming": false,
+        "translate": false,
+        "lang_detect": true,
+        "timestamps": "token"
+      },
+      "speed_score": null,
+      "accuracy_score": null,
+      "files": [
+        {
+          "filename": "parakeet-ultra-0.6b-Q4_K_M.gguf",
+          "quant": "Q4_K_M",
+          "size_bytes": 485425632,
+          "sha256": "1865a03092b566251a9a0a7cc1036872821225047759e1f73fa476694bb453f5"
+        },
+        {
+          "filename": "parakeet-ultra-0.6b-Q5_K_M.gguf",
+          "quant": "Q5_K_M",
+          "size_bytes": 548946400,
+          "sha256": "2a943b4574664abc96b2dbb2b46cd149bc162fda41080febbf5f949db73ad055"
+        },
+        {
+          "filename": "parakeet-ultra-0.6b-Q6_K.gguf",
+          "quant": "Q6_K",
+          "size_bytes": 610342368,
+          "sha256": "e1c6c0860397473dc4b7831e2da70fa53f5d472d1791ae174982897d3d60ab6a"
+        },
+        {
+          "filename": "parakeet-ultra-0.6b-Q8_0.gguf",
+          "quant": "Q8_0",
+          "size_bytes": 739508704,
+          "sha256": "283562ac9b513f39244fe23c6632738c167d32731a5f4693319a10ca498550a8"
+        },
+        {
+          "filename": "parakeet-ultra-0.6b-F16.gguf",
+          "quant": "F16",
+          "size_bytes": 1255869984,
+          "sha256": "06d3d511e03b2f36aac831f11ce05d088fd071e0fa5685dc70cda1cc7a4a04e4"
+        }
+      ],
+      "default_quant": "Q8_0",
+      "recommended": false,
+      "recommended_rank": 7
+    }
+  ]
+}
