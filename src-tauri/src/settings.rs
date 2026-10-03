@@ -540,7 +540,7 @@ fn default_model() -> String {
     "".to_string()
 }
 
-const CURRENT_SETTINGS_SCHEMA_VERSION: u32 = 2;
+const CURRENT_SETTINGS_SCHEMA_VERSION: u32 = 3;
 
 fn default_settings_schema_version() -> u32 {
     CURRENT_SETTINGS_SCHEMA_VERSION
@@ -1181,7 +1181,11 @@ fn apply_settings_migrations(
             settings.transcribe_accelerator = TranscribeAcceleratorSetting::Auto;
         }
     }
-    if stored_schema_version < 2 {
+    if stored_schema_version < 2
+        || settings_value
+            .get("transcribe_gpu_device")
+            .is_some_and(|value| value.is_number())
+    {
         // transcribe.cpp 0.2 replaced integer registry indices with opaque
         // process-local handles. Clear every old index once.
         settings.transcribe_gpu_device = default_transcribe_gpu_device();
@@ -1195,8 +1199,9 @@ fn apply_settings_migrations(
         && settings.transcribe_gpu_device.is_none()
     {
         settings.transcribe_accelerator = TranscribeAcceleratorSetting::Auto;
+        updated = true;
     }
-    if stored_schema_version < 2 {
+    if stored_schema_version < 3 {
         let _ = migrate_post_process_hotkey_to_selected_prompt(settings);
         settings.settings_schema_version = CURRENT_SETTINGS_SCHEMA_VERSION;
         updated = true;
@@ -1774,6 +1779,59 @@ mod tests {
             TranscribeAcceleratorSetting::Auto
         );
         assert_eq!(settings.transcribe_gpu_device, None);
+    }
+
+    #[test]
+    fn fork_v2_store_migrates_numeric_device_without_losing_prompt_hotkey() {
+        let raw = serde_json::json!({
+            "settings_schema_version": 2,
+            "transcribe_accelerator": "gpu",
+            "transcribe_gpu_device": 2,
+            "post_process_prompts": [{ "id": "fork", "name": "Fork", "prompt": "${output}", "hotkey": "ctrl+shift+space" }],
+            "post_process_selected_prompt_id": "fork"
+        });
+        let mut settings: AppSettings = serde_json::from_value(raw.clone()).unwrap();
+        assert!(apply_settings_migrations(&mut settings, &raw));
+        assert_eq!(settings.settings_schema_version, 3);
+        assert_eq!(settings.transcribe_gpu_device, None);
+        assert_eq!(
+            settings.transcribe_accelerator,
+            TranscribeAcceleratorSetting::Auto
+        );
+        assert_eq!(
+            settings.post_process_prompts[0].hotkey.as_deref(),
+            Some("ctrl+shift+space")
+        );
+    }
+
+    #[test]
+    fn upstream_v2_store_migrates_prompt_hotkey_without_resetting_stable_device() {
+        let mut settings = get_default_settings();
+        settings.settings_schema_version = 2;
+        settings.transcribe_gpu_device = Some("stable-device".into());
+        settings.bindings.insert(
+            "transcribe_with_post_process".into(),
+            ShortcutBinding {
+                id: "transcribe_with_post_process".into(),
+                name: "Post-process".into(),
+                description: String::new(),
+                default_binding: "ctrl+shift+space".into(),
+                current_binding: "ctrl+alt+space".into(),
+            },
+        );
+        let raw = serde_json::to_value(&settings).unwrap();
+        assert!(apply_settings_migrations(&mut settings, &raw));
+        assert_eq!(
+            settings.transcribe_gpu_device.as_deref(),
+            Some("stable-device")
+        );
+        assert_eq!(
+            settings.post_process_prompts[0].hotkey.as_deref(),
+            Some("ctrl+alt+space")
+        );
+        assert!(!settings
+            .bindings
+            .contains_key("transcribe_with_post_process"));
     }
 
     #[test]

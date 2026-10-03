@@ -206,7 +206,9 @@ fn process_memory_snapshot() -> Option<ProcessMemorySnapshot> {
 
 #[cfg(test)]
 mod tests {
-    use super::{available_memory_bytes, bytes_to_mib, process_memory_snapshot};
+    use super::bytes_to_mib;
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    use super::{available_memory_bytes, process_memory_snapshot};
 
     #[test]
     fn formats_binary_mebibytes() {

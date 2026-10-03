@@ -718,6 +718,8 @@ struct CaptureProcessor {
     capture_ready_tx: Option<mpsc::Sender<()>>,
     total_dropped_samples: u64,
     overrun_warning_logged: bool,
+    recording_started: Option<Instant>,
+    next_recording_progress_log: Duration,
 }
 
 impl CaptureProcessor {
@@ -769,11 +771,16 @@ impl CaptureProcessor {
             capture_ready_tx: None,
             total_dropped_samples: 0,
             overrun_warning_logged: false,
+            recording_started: None,
+            next_recording_progress_log: Duration::from_secs(60),
         }
     }
 
     /// Reset per-recording state and arm the first-sample acknowledgement.
     fn begin_recording(&mut self, policy: VadPolicy, ready_tx: mpsc::Sender<()>) {
+        log_memory_snapshot("audio recording started");
+        self.recording_started = Some(Instant::now());
+        self.next_recording_progress_log = Duration::from_secs(60);
         self.awaiting_first_captured_chunk = Some(Instant::now());
         self.capture_ready_tx = Some(ready_tx);
         self.total_dropped_samples = 0;
@@ -839,6 +846,14 @@ impl CaptureProcessor {
             )
         });
 
+        if self
+            .recording_started
+            .is_some_and(|started| started.elapsed() >= self.next_recording_progress_log)
+        {
+            self.log_recording_buffer("progress");
+            self.next_recording_progress_log += Duration::from_secs(60);
+        }
+
         if let Some(started) = self.awaiting_first_captured_chunk.take() {
             log::debug!(
                 "first captured samples ({:.1}ms) processed {:?} after Cmd::Start",
@@ -871,6 +886,7 @@ impl CaptureProcessor {
 
     /// Flush the resampler tail and hand back the finished recording.
     fn finish_recording(&mut self) -> Vec<f32> {
+        log_memory_snapshot("audio recording buffer finalizing");
         let vad_policy = self.vad_policy;
         self.frame_resampler.finish(|frame: &[f32]| {
             handle_frame(
@@ -908,7 +924,21 @@ impl CaptureProcessor {
                 self.total_dropped_samples
             );
         }
+        self.log_recording_buffer("finalized");
+        self.recording_started = None;
         std::mem::take(&mut self.processed_samples)
+    }
+
+    fn log_recording_buffer(&self, phase: &str) {
+        log::info!(
+            "Audio recording buffer {phase}: elapsed={:.1}s, samples={}, duration={:.1}s, len_bytes={}, capacity_bytes={}",
+            self.recording_started.map_or(0.0, |started| started.elapsed().as_secs_f64()),
+            self.processed_samples.len(),
+            self.processed_samples.len() as f64 / constants::WHISPER_SAMPLE_RATE as f64,
+            self.processed_samples.len().saturating_mul(std::mem::size_of::<f32>()),
+            self.processed_samples.capacity().saturating_mul(std::mem::size_of::<f32>()),
+        );
+        log_memory_snapshot("audio recording buffer");
     }
 }
 

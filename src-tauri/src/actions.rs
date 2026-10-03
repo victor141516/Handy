@@ -20,7 +20,6 @@ use crate::utils::{
     self, show_processing_overlay, show_recording_overlay, show_transcribing_overlay,
 };
 use crate::TranscriptionCoordinator;
-use ferrous_opencc::{config::BuiltinConfig, OpenCC};
 use log::{debug, error, info, warn};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
@@ -1329,7 +1328,8 @@ pub static ACTION_MAP: Lazy<HashMap<String, Arc<dyn ShortcutAction>>> = Lazy::ne
 mod tests {
     use super::{
         build_accessibility_timeline, build_accessibility_timeline_owned,
-        complete_unless_cancelled, is_blank_transcription, should_use_streaming_overlay, strip_think_block,
+        complete_unless_cancelled, is_blank_transcription, should_use_streaming_overlay,
+        strip_think_block,
     };
     use crate::accessibility_context::AccessibilityContextEvent;
     use crate::managers::transcription::{TranscriptionOutput, TranscriptionSegment};

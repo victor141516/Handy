@@ -489,6 +489,14 @@ impl CoordinatorState {
         ))
     }
 
+    fn try_begin_processing(&mut self) -> bool {
+        if !matches!(self.stage, Stage::Idle) {
+            return false;
+        }
+        self.stage = Stage::Processing;
+        true
+    }
+
     /// Reconcile the optimistic `Stage::Recording` after the executor reports
     /// whether recording actually began (microphone access can be denied).
     fn on_start_result(&mut self, binding_id: &str, started: bool) {
@@ -590,11 +598,7 @@ impl TranscriptionCoordinator {
                             recording_was_active,
                         } => state.on_cancel(recording_was_active),
                         Command::TryBeginProcessing { reply } => {
-                            let accepted = matches!(state.stage, Stage::Idle);
-                            if accepted {
-                                state.stage = Stage::Processing;
-                            }
-                            let _ = reply.send(accepted);
+                            let _ = reply.send(state.try_begin_processing());
                         }
                         Command::ProcessingFinished => {
                             if let Some(effect) = state.on_processing_finished() {
@@ -723,7 +727,12 @@ fn run_effect(app: &AppHandle, state: &mut CoordinatorState, effect: Effect) {
 /// Execute a start effect; returns whether recording actually began, so the
 /// state machine can roll back its optimistic transition on failure.
 fn start(app: &AppHandle, binding_id: &str, hotkey_string: &str) -> bool {
-    let action_id = if crate::shortcut::post_process_prompt_id_from_binding_id(binding_id).is_some() { "transcribe_with_post_process" } else { binding_id };
+    let action_id = if crate::shortcut::post_process_prompt_id_from_binding_id(binding_id).is_some()
+    {
+        "transcribe_with_post_process"
+    } else {
+        binding_id
+    };
     let Some(action) = ACTION_MAP.get(action_id) else {
         warn!("No action in ACTION_MAP for '{binding_id}'");
         return false;
@@ -739,7 +748,12 @@ fn start(app: &AppHandle, binding_id: &str, hotkey_string: &str) -> bool {
 }
 
 fn stop(app: &AppHandle, binding_id: &str, hotkey_string: &str) {
-    let action_id = if crate::shortcut::post_process_prompt_id_from_binding_id(binding_id).is_some() { "transcribe_with_post_process" } else { binding_id };
+    let action_id = if crate::shortcut::post_process_prompt_id_from_binding_id(binding_id).is_some()
+    {
+        "transcribe_with_post_process"
+    } else {
+        binding_id
+    };
     let Some(action) = ACTION_MAP.get(action_id) else {
         warn!("No action in ACTION_MAP for '{binding_id}'");
         return;
@@ -795,6 +809,17 @@ mod tests {
     fn prompt_post_process_bindings_are_transcribe_bindings() {
         assert!(is_transcribe_binding("post_process_prompt:prompt_123"));
         assert!(!is_transcribe_binding("post_process_prompt:"));
+    }
+
+    #[test]
+    fn imported_audio_claims_only_an_idle_pipeline() {
+        let mut state = CoordinatorState::new();
+        assert!(state.try_begin_processing());
+        assert!(!state.try_begin_processing());
+        assert!(state.on_processing_finished().is_none());
+        state.stage = Stage::Recording("transcribe".into());
+        assert!(!state.try_begin_processing());
+        assert_eq!(state.stage, Stage::Recording("transcribe".into()));
     }
 
     #[test]

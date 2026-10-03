@@ -1177,15 +1177,23 @@ impl TranscriptionManager {
                                     update.input_received_ms.max(update.audio_committed_ms),
                                 );
                                 if committed_segments.is_empty() {
-                                    Some(FinalizedStreamText { output: TranscriptionOutput::text_only(
-                                        display,
-                                        perf.streamed_samples as usize,
-                                    ), output_language: output_language.clone(), supported_languages: languages.clone() })
+                                    Some(FinalizedStreamText {
+                                        output: TranscriptionOutput::text_only(
+                                            display,
+                                            perf.streamed_samples as usize,
+                                        ),
+                                        output_language: output_language.clone(),
+                                        supported_languages: languages.clone(),
+                                    })
                                 } else {
-                                    Some(FinalizedStreamText { output: TranscriptionOutput {
-                                        text: display,
-                                        segments: std::mem::take(&mut committed_segments),
-                                    }, output_language, supported_languages: languages.clone() })
+                                    Some(FinalizedStreamText {
+                                        output: TranscriptionOutput {
+                                            text: display,
+                                            segments: std::mem::take(&mut committed_segments),
+                                        },
+                                        output_language,
+                                        supported_languages: languages.clone(),
+                                    })
                                 }
                             }
                             Err(e) => {
@@ -1309,14 +1317,26 @@ impl TranscriptionManager {
         // Streaming models do not receive a decode prompt, so custom words
         // always go through the shared fuzzy post-correction path.
         let mut output = finalized.output;
-        let filtered = post_process_transcription_text(output.text.clone(), &settings, false, &finalized.output_language, &finalized.supported_languages);
+        let filtered = post_process_transcription_text(
+            output.text.clone(),
+            &settings,
+            false,
+            &finalized.output_language,
+            &finalized.supported_languages,
+        );
         if filtered != output.text {
             let audio_len = output
                 .segments
                 .last()
                 .map_or(0, |segment| segment.end_ms.saturating_mul(16) as usize);
             output = post_process_transcription_output_segments(
-                output, filtered, &settings, false, audio_len, &finalized.output_language, &finalized.supported_languages,
+                output,
+                filtered,
+                &settings,
+                false,
+                audio_len,
+                &finalized.output_language,
+                &finalized.supported_languages,
             );
         }
 
@@ -1636,7 +1656,8 @@ impl TranscriptionManager {
                                 model_supports_translate,
                             );
 
-                            output_was_translated = run_plan.target_language.as_deref() == Some("en");
+                            output_was_translated =
+                                run_plan.target_language.as_deref() == Some("en");
                             applied_language_hint = run_plan.language.clone();
                             let run_options = RunOptions {
                                 task: run_plan.task,
@@ -1691,7 +1712,7 @@ impl TranscriptionManager {
                                 anyhow::anyhow!("Moonshine streaming transcription failed: {}", e)
                             }),
                         LoadedEngine::SenseVoice(sense_voice_engine) => {
-                            let language = match normalize_cjk_language(&validated_language) {
+                            let language = match validated_language.as_str() {
                                 "zh" => Some("zh".to_string()),
                                 "en" => Some("en".to_string()),
                                 "ja" => Some("ja".to_string()),
@@ -1699,6 +1720,7 @@ impl TranscriptionManager {
                                 "yue" => Some("yue".to_string()),
                                 _ => None,
                             };
+                            applied_language_hint = language.clone();
                             let params = SenseVoiceParams {
                                 language,
                                 use_itn: Some(true),
@@ -1715,11 +1737,13 @@ impl TranscriptionManager {
                             .map(|r| transcription_output_from_rs(r, audio_len))
                             .map_err(|e| anyhow::anyhow!("GigaAM transcription failed: {}", e)),
                         LoadedEngine::Canary(canary_engine) => {
+                            output_was_translated = settings.translate_to_english;
                             let lang = if validated_language == "auto" {
                                 None
                             } else {
                                 Some(validated_language.clone())
                             };
+                            applied_language_hint = lang.clone();
                             let options = TranscribeOptions {
                                 language: lang,
                                 translate: settings.translate_to_english,
@@ -1734,8 +1758,9 @@ impl TranscriptionManager {
                             let lang = if validated_language == "auto" {
                                 None
                             } else {
-                                Some(normalize_cjk_language(&validated_language).to_string())
+                                Some(validated_language.clone())
                             };
+                            applied_language_hint = lang.clone();
                             let options = TranscribeOptions {
                                 language: lang,
                                 ..Default::default()
@@ -1812,8 +1837,13 @@ impl TranscriptionManager {
         // whisper-kind run extension), so they still get fuzzy correction here,
         // same as the ONNX engines.
         let mut output = result;
-        let filtered_result =
-            post_process_transcription_text(output.text.clone(), &settings, model_is_whisper, &output_language, &model_languages);
+        let filtered_result = post_process_transcription_text(
+            output.text.clone(),
+            &settings,
+            model_is_whisper,
+            &output_language,
+            &model_languages,
+        );
         if filtered_result != output.text {
             output = post_process_transcription_output_segments(
                 output,
@@ -1821,6 +1851,8 @@ impl TranscriptionManager {
                 &settings,
                 model_is_whisper,
                 audio_len,
+                &output_language,
+                &model_languages,
             );
         } else {
             output.text = filtered_result;
@@ -2156,6 +2188,8 @@ fn post_process_transcription_output_segments(
     settings: &AppSettings,
     custom_words_already_prompted: bool,
     audio_len: usize,
+    output_language: &OutputLanguageEvidence,
+    supported_languages: &[String],
 ) -> TranscriptionOutput {
     if output.segments.is_empty() {
         return TranscriptionOutput::text_only(filtered_text, audio_len);
@@ -2169,8 +2203,13 @@ fn post_process_transcription_output_segments(
                 end_ms,
                 text,
             } = segment;
-            let text =
-                post_process_transcription_text(text, settings, custom_words_already_prompted);
+            let text = post_process_transcription_text(
+                text,
+                settings,
+                custom_words_already_prompted,
+                output_language,
+                supported_languages,
+            );
             if text.trim().is_empty() {
                 None
             } else {
@@ -2905,6 +2944,44 @@ mod tests {
             text: text.to_string(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn segment_filtering_preserves_timestamps_and_output_language() {
+        let settings = AppSettings {
+            chinese_script: ChineseScript::Traditional,
+            ..Default::default()
+        };
+        let evidence = OutputLanguageEvidence::UserSelected("zh".into());
+        let supported = languages(&["zh"]);
+        let original = "这是一个测试".to_string();
+        let filtered = post_process_transcription_text(
+            original.clone(),
+            &settings,
+            false,
+            &evidence,
+            &supported,
+        );
+        let output = post_process_transcription_output_segments(
+            TranscriptionOutput {
+                text: original.clone(),
+                segments: vec![TranscriptionSegment {
+                    start_ms: 500,
+                    end_ms: 1_500,
+                    text: original,
+                }],
+            },
+            filtered.clone(),
+            &settings,
+            false,
+            32_000,
+            &evidence,
+            &supported,
+        );
+        assert_eq!(output.text, filtered);
+        assert_eq!(output.segments[0].text, filtered);
+        assert_eq!(output.segments[0].start_ms, 500);
+        assert_eq!(output.segments[0].end_ms, 1_500);
     }
 
     #[test]
